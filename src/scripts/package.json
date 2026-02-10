@@ -1,0 +1,25 @@
+{
+  "name": "antamulladi-bot",
+  "version": "1.0.0",
+  "description": "Logam Mulia gold purchase automation",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "prices": "node index.js --prices-only",
+    "cart": "node index.js --cart-only",
+    "switch": "node switch-store.js",
+    "stores": "node switch-store.js --list"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "axios-cookiejar-support": "^4.0.7",
+    "chalk": "^4.1.2",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.0",
+    "form-data": "^4.0.0",
+    "puppeteer": "^23.0.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "tough-cookie": "^4.1.4"
+  }
+}
