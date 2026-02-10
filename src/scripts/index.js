@@ -2,7 +2,7 @@
 const chalk = require('chalk');
 const config = require('./config');
 const { ask, close: closePrompt } = require('./lib/prompt');
-const { launchBrowser, login, extractCookies, extractCsrfToken } = require('./lib/browser');
+const { launchBrowser, login, extractCookies, extractCurrentStore, extractCsrfToken } = require('./lib/browser');
 const LogamMuliaAPI = require('./lib/api');
 const { syncCookiesToPage, verifyCart, processCheckout } = require('./lib/checkout');
 
@@ -200,7 +200,7 @@ async function main() {
 
   try {
     console.log(chalk.cyan('  [2/5] ' + (useBrowser ? 'Checking login status...' : 'Logging in (with Cloudflare bypass)...')));
-    await login(page, { manualLogin: useBrowser });
+    page = await login(page, { manualLogin: useBrowser, browser, raceTabs: config.raceTabs });
 
     // Step 3: Navigate to purchase page to ensure we're on the right domain and have fresh tokens
     console.log(chalk.cyan(`  [3/5] Navigating to purchase page...`));
@@ -223,33 +223,40 @@ async function main() {
     if (csrfToken) api.setCsrfToken(csrfToken);
 
     // Step 4: Switch to selected store and fetch stock
-    console.log(chalk.cyan(`  [4/5] Switching to ${storeName}...`));
-    if (useBrowser) {
-      // When using existing browser, change location via Puppeteer form submission
-      await page.evaluate((storeCode, token) => {
-        // Fill the hidden location change form
-        const form = document.querySelector('#geoloc-change-location');
-        if (form) {
-          const locationInput = form.querySelector('input[name="location"]');
-          const tokenInput = form.querySelector('input[name="_token"]');
-          if (locationInput && tokenInput) {
-            locationInput.value = storeCode;
-            tokenInput.value = token;
-            form.submit();
-          }
-        }
-      }, storeCode, csrfToken);
-
-      // Wait for navigation after location change
-      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30_000 }).catch(() => {});
-      await new Promise(r => setTimeout(r, 2000));
-
-      // Re-extract CSRF token after page reload
-      const newToken = await extractCsrfToken(page);
-      if (newToken) api.setCsrfToken(newToken);
+    const currentStore = await extractCurrentStore(page);
+    if (currentStore && currentStore === storeCode) {
+      console.log(chalk.green(`  [4/5] Already at ${storeName} (${storeCode}), skipping location change`));
     } else {
-      // Normal mode: use API
-      await api.changeLocation(storeCode);
+      console.log(chalk.cyan(`  [4/5] Switching to ${storeName}...`));
+      if (currentStore) {
+        console.log(chalk.gray(`  Current store: ${currentStore}`));
+      }
+      if (useBrowser) {
+        // When using existing browser, change location via Puppeteer form submission
+        await page.evaluate((storeCode, token) => {
+          const form = document.querySelector('#geoloc-change-location');
+          if (form) {
+            const locationInput = form.querySelector('input[name="location"]');
+            const tokenInput = form.querySelector('input[name="_token"]');
+            if (locationInput && tokenInput) {
+              locationInput.value = storeCode;
+              tokenInput.value = token;
+              form.submit();
+            }
+          }
+        }, storeCode, csrfToken);
+
+        // Wait for navigation after location change
+        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30_000 }).catch(() => {});
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Re-extract CSRF token after page reload
+        const newToken = await extractCsrfToken(page);
+        if (newToken) api.setCsrfToken(newToken);
+      } else {
+        // Normal mode: use API
+        await api.changeLocation(storeCode);
+      }
     }
 
     console.log(chalk.cyan(`  [5/5] Fetching prices and stock...`));

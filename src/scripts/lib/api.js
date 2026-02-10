@@ -239,16 +239,53 @@ class LogamMuliaAPI {
       headers['X-XSRF-TOKEN'] = this.xsrfToken;
     }
 
-    const response = await this.client.post(config.endpoints.addToCartMultiple, form, {
-      headers,
-      maxRedirects: 5,
-      validateStatus: (status) => status < 500,
-    });
+    console.log('[api] POST', config.endpoints.addToCartMultiple);
+    console.log('[api] CSRF token:', this.csrfToken ? this.csrfToken.substring(0, 20) + '...' : 'MISSING');
+    console.log('[api] XSRF token:', this.xsrfToken ? 'yes' : 'no');
+    console.log('[api] Items:', items.map(i => `${i.name} x${i.qty}`).join(', '));
+    console.log('[api] Grand total:', grandTotal);
 
-    // After adding to cart, the server typically redirects to the cart page
-    // or back to the purchase page
+    let response;
+    try {
+      response = await this.client.post(config.endpoints.addToCartMultiple, form, {
+        headers,
+        maxRedirects: 5,
+        validateStatus: () => true, // Accept all status codes for logging
+      });
+    } catch (err) {
+      console.error('[api] Request error:', err.message);
+      if (err.response) {
+        console.error('[api] Response status:', err.response.status);
+        console.error('[api] Response headers:', JSON.stringify(err.response.headers, null, 2));
+        console.error('[api] Response body:', typeof err.response.data === 'string'
+          ? err.response.data.substring(0, 2000)
+          : JSON.stringify(err.response.data));
+      }
+      throw err;
+    }
+
     const success = response.status === 200 || response.status === 302;
     const redirectedTo = response.request?.res?.responseUrl || response.headers?.location || '';
+
+    console.log('[api] Response status:', response.status);
+    console.log('[api] Response headers:', JSON.stringify({
+      'content-type': response.headers['content-type'],
+      'location': response.headers['location'],
+      'set-cookie': response.headers['set-cookie'] ? `(${response.headers['set-cookie'].length} cookies)` : 'none',
+      'cf-ray': response.headers['cf-ray'],
+      'server': response.headers['server'],
+    }, null, 2));
+
+    if (!success) {
+      const body = typeof response.data === 'string'
+        ? response.data.substring(0, 3000)
+        : JSON.stringify(response.data);
+      console.error('[api] Response body:', body);
+    }
+
+    if (redirectedTo) {
+      console.log('[api] Redirected to:', redirectedTo);
+    }
 
     // Update CSRF token if the response contains a new one
     if (response.data && typeof response.data === 'string') {
@@ -276,15 +313,24 @@ class LogamMuliaAPI {
   // Export cookies back to a format Puppeteer can use
   async exportCookies() {
     const cookies = await this.jar.getCookies(config.BASE_URL);
-    return cookies.map(c => ({
-      name: c.key,
-      value: c.value,
-      domain: c.domain,
-      path: c.path,
-      expires: c.expires ? new Date(c.expires).getTime() / 1000 : -1,
-      httpOnly: c.httpOnly,
-      secure: c.secure,
-    }));
+    return cookies.map(c => {
+      let expires = -1;
+      if (c.expires && c.expires !== 'Infinity') {
+        const ts = new Date(c.expires).getTime();
+        if (!isNaN(ts)) {
+          expires = ts / 1000;
+        }
+      }
+      return {
+        name: c.key,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        expires,
+        httpOnly: c.httpOnly,
+        secure: c.secure,
+      };
+    });
   }
 }
 

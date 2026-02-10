@@ -107,16 +107,116 @@ async function waitForCloudflare(page) {
   throw new Error('Cloudflare challenge did not resolve within timeout');
 }
 
+// Race multiple tabs to load a URL - each tab retries forever until one gets HTTP 200
+async function raceLoadPage(browser, url, numTabs = 10) {
+  console.log(`[browser] Racing ${numTabs} tabs to load page...`);
+
+  const pages = [];
+  for (let i = 0; i < numTabs; i++) {
+    pages.push(await browser.newPage());
+  }
+
+  let resolved = false;
+
+  async function attemptTab(p, tabIndex) {
+    let attempt = 0;
+    while (!resolved) {
+      attempt++;
+      try {
+        const response = await p.goto(url, {
+          waitUntil: 'networkidle2',
+          timeout: NAVIGATION_TIMEOUT,
+        });
+
+        const status = response ? response.status() : 0;
+
+        if (status >= 200 && status < 300 && !resolved) {
+          return { page: p, status, tabIndex };
+        }
+
+        if (resolved) return null;
+
+        console.log(`[browser] Tab ${tabIndex + 1}/${numTabs}: HTTP ${status} (attempt ${attempt}), retrying...`);
+      } catch (err) {
+        if (resolved) return null;
+        console.log(`[browser] Tab ${tabIndex + 1}/${numTabs}: ${err.message} (attempt ${attempt}), retrying...`);
+      }
+
+      // Stagger retries: 1-3s random delay per tab to avoid hammering
+      await wait(1000 + Math.random() * 2000);
+    }
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    for (let i = 0; i < pages.length; i++) {
+      attemptTab(pages[i], i).then(result => {
+        if (result && !resolved) {
+          resolved = true;
+          console.log(`[browser] Tab ${result.tabIndex + 1}/${numTabs} won with HTTP ${result.status}`);
+          for (const p of pages) {
+            if (p !== result.page) p.close().catch(() => {});
+          }
+          resolve(result.page);
+        }
+      });
+    }
+  });
+}
+
+// Retry loading a URL on a single page forever until HTTP 200
+async function retryLoadPage(page, url) {
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      const response = await page.goto(url, {
+        waitUntil: 'networkidle2',
+        timeout: NAVIGATION_TIMEOUT,
+      });
+
+      const status = response ? response.status() : 0;
+      if (status >= 200 && status < 300) {
+        return page;
+      }
+
+      const delay = Math.min(attempt * 2000, 10_000);
+      console.log(`[browser] Got HTTP ${status}, retrying in ${delay / 1000}s (attempt ${attempt})...`);
+      await wait(delay);
+    } catch (err) {
+      const delay = Math.min(attempt * 2000, 10_000);
+      console.log(`[browser] ${err.message}, retrying in ${delay / 1000}s (attempt ${attempt})...`);
+      await wait(delay);
+    }
+  }
+}
+
 async function login(page, options = {}) {
-  const { skipIfLoggedIn = true, manualLogin = false } = options;
+  const { skipIfLoggedIn = true, manualLogin = false, browser = null, raceTabs = 1 } = options;
 
   // Navigate to the purchase page first (triggers CF challenge if needed)
   const currentUrl = page.url();
   if (!currentUrl.includes('/purchase/gold')) {
-    await page.goto(config.BASE_URL + config.endpoints.purchasePage, {
-      waitUntil: 'networkidle2',
-      timeout: NAVIGATION_TIMEOUT,
-    });
+    const url = config.BASE_URL + config.endpoints.purchasePage;
+
+    if (browser && raceTabs > 1) {
+      // Race multiple tabs for faster loading
+      try {
+        const winningPage = await raceLoadPage(browser, url, raceTabs);
+        // Close the original page unless we're in manual login mode (user's tab)
+        if (winningPage !== page && !manualLogin) {
+          page.close().catch(() => {});
+        }
+        page = winningPage;
+      } catch (err) {
+        console.log(`[browser] Race failed: ${err.message}`);
+        console.log('[browser] Falling back to single-tab retry...');
+        page = await retryLoadPage(page, url);
+      }
+    } else {
+      // Single tab with retry
+      page = await retryLoadPage(page, url);
+    }
   }
 
   await waitForCloudflare(page);
@@ -129,7 +229,7 @@ async function login(page, options = {}) {
 
   if (isLoggedIn) {
     console.log('[browser] Already logged in');
-    return;
+    return page;
   }
 
   if (manualLogin) {
@@ -147,7 +247,7 @@ async function login(page, options = {}) {
       });
       if (nowLoggedIn) {
         console.log('[browser] Login detected!');
-        return;
+        return page;
       }
     }
     throw new Error('Manual login timeout - user did not log in within 5 minutes');
@@ -177,7 +277,6 @@ async function login(page, options = {}) {
   await wait(1500);
 
   // Find and fill the login form
-  // The popup-login form typically has email + password fields
   const emailSelector = await findInputSelector(page, ['input[name="email"]', 'input[type="email"]', '#email']);
   const passwordSelector = await findInputSelector(page, ['input[name="password"]', 'input[type="password"]', '#password']);
 
@@ -229,13 +328,14 @@ async function login(page, options = {}) {
       });
       if (checkAgain) {
         console.log('[browser] Login successful (detected via logout link)');
-        return;
+        return page;
       }
     }
     throw new Error('Login failed - check your credentials');
   }
 
   console.log('[browser] Login successful');
+  return page;
 }
 
 async function findInputSelector(page, selectors) {
@@ -249,6 +349,20 @@ async function findInputSelector(page, selectors) {
 async function extractCookies(page) {
   const cookies = await page.cookies();
   return cookies;
+}
+
+async function extractCurrentStore(page) {
+  const store = await page.evaluate(() => {
+    // Look for var current_storage = 'XXXX' in script tags
+    const scripts = document.querySelectorAll('script');
+    for (const script of scripts) {
+      const text = script.textContent || '';
+      const match = text.match(/current_storage\s*=\s*['"](\w+)['"]/);
+      if (match) return match[1];
+    }
+    return null;
+  });
+  return store;
 }
 
 async function extractCsrfToken(page) {
@@ -267,5 +381,6 @@ module.exports = {
   waitForCloudflare,
   login,
   extractCookies,
+  extractCurrentStore,
   extractCsrfToken,
 };

@@ -2,7 +2,7 @@
 const chalk = require('chalk');
 const config = require('./config');
 const { ask, close: closePrompt } = require('./lib/prompt');
-const { launchBrowser, login, extractCookies, extractCsrfToken } = require('./lib/browser');
+const { launchBrowser, login, extractCookies, extractCurrentStore, extractCsrfToken } = require('./lib/browser');
 const LogamMuliaAPI = require('./lib/api');
 
 // All store locations
@@ -145,7 +145,7 @@ async function main() {
 
   try {
     console.log(chalk.cyan('  Logging in...'));
-    await login(page, { manualLogin: useBrowser });
+    page = await login(page, { manualLogin: useBrowser, browser, raceTabs: config.raceTabs });
 
     // Navigate to purchase page
     const currentUrl = page.url();
@@ -160,6 +160,19 @@ async function main() {
     const cookies = await extractCookies(page);
     const csrfToken = await extractCsrfToken(page);
 
+    // Check if already at the selected store
+    const currentStore = await extractCurrentStore(page);
+    if (currentStore && currentStore === selectedStore.code) {
+      console.log(chalk.green(`\n  Already at ${selectedStore.name} (${selectedStore.code}), no switch needed.`));
+      if (!useBrowser) {
+        await browser.close();
+      }
+      return;
+    }
+
+    if (currentStore) {
+      console.log(chalk.gray(`  Current store: ${currentStore}`));
+    }
     console.log(chalk.cyan(`  Switching to ${selectedStore.name}...`));
 
     if (useBrowser) {

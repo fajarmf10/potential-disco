@@ -40,6 +40,7 @@ module.exports = {
   tujuanTransaksi: process.env.LM_TUJUAN_TRANSAKSI || 'Investasi',
   paymentMethod: process.env.LM_PAYMENT_METHOD || '',
   headless: process.env.LM_HEADLESS !== 'false',
+  raceTabs: parseInt(process.env.LM_RACE_TABS || '10', 10),
 
   cartItems: parseCartItems(process.env.LM_CART_ITEMS),
 
