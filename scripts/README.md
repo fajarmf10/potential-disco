@@ -1,5 +1,37 @@
 # Scripts
 
+## download_cart_assets.py
+
+Downloads only JS and CSS assets referenced by `src/cart/index.html` into local folders (default base: `src/cart/`).
+If Python TLS handshake fails on some hosts, it automatically retries with `curl`.
+
+**No extra dependencies** (uses Python standard library only).
+
+### Usage
+
+```bash
+# List what would be downloaded from src/cart/index.html
+python download_cart_assets.py --dry-run
+
+# Download JS/CSS assets
+python download_cart_assets.py
+
+# Download and rewrite src/cart/index.html to local relative paths
+python download_cart_assets.py --rewrite
+```
+
+### Options
+
+| Option       | Description |
+|-------------|-------------|
+| `--html`    | Path to cart HTML (default: `src/cart/index.html`) |
+| `--out`     | Base output directory (default: `src/cart/`) |
+| `--base-url`| Base URL for resolving relative links (default: `https://logammulia.com`) |
+| `--rewrite` | Rewrite asset links in the HTML to local relative paths |
+| `--dry-run` | Print targets without downloading |
+
+---
+
 ## download_html_assets.py
 
 Downloads JS, CSS, and other static assets referenced by `src/index.html` (from logammulia.com and Google Fonts) into `src/css`, `src/js`, etc., so the page can be used with local assets.

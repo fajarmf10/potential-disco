@@ -264,7 +264,8 @@ class LogamMuliaAPI {
       throw err;
     }
 
-    const success = response.status === 200 || response.status === 302;
+    const is2xx = response.status >= 200 && response.status < 300;
+    const success = is2xx || response.status === 302;
     const redirectedTo = response.request?.res?.responseUrl || response.headers?.location || '';
 
     console.log('[api] Response status:', response.status);
@@ -305,6 +306,7 @@ class LogamMuliaAPI {
 
     return {
       success,
+      is2xx,
       status: response.status,
       redirectedTo,
     };

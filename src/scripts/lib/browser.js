@@ -107,12 +107,20 @@ async function waitForCloudflare(page) {
   throw new Error('Cloudflare challenge did not resolve within timeout');
 }
 
-// Race multiple tabs to load a URL - each tab retries forever until one gets HTTP 200
-async function raceLoadPage(browser, url, numTabs = 10) {
-  console.log(`[browser] Racing ${numTabs} tabs to load page...`);
+// Race multiple tabs to load a URL - each tab retries forever until one gets HTTP 2xx.
+// Use options.logAttempts=false when this runs alongside interactive prompts.
+async function raceLoadPage(browser, url, numTabs = 10, options = {}) {
+  const {
+    logAttempts = true,
+    retryDelayMinMs = 1000,
+    retryDelayMaxMs = 3000,
+  } = options;
+  const safeTabs = Math.max(1, parseInt(numTabs, 10) || 1);
+
+  console.log(`[browser] Racing ${safeTabs} tabs to load page...`);
 
   const pages = [];
-  for (let i = 0; i < numTabs; i++) {
+  for (let i = 0; i < safeTabs; i++) {
     pages.push(await browser.newPage());
   }
 
@@ -135,15 +143,20 @@ async function raceLoadPage(browser, url, numTabs = 10) {
         }
 
         if (resolved) return null;
-
-        console.log(`[browser] Tab ${tabIndex + 1}/${numTabs}: HTTP ${status} (attempt ${attempt}), retrying...`);
+        if (logAttempts) {
+          console.log(`[browser] Tab ${tabIndex + 1}/${safeTabs}: HTTP ${status} (attempt ${attempt}), retrying...`);
+        }
       } catch (err) {
         if (resolved) return null;
-        console.log(`[browser] Tab ${tabIndex + 1}/${numTabs}: ${err.message} (attempt ${attempt}), retrying...`);
+        if (logAttempts) {
+          console.log(`[browser] Tab ${tabIndex + 1}/${safeTabs}: ${err.message} (attempt ${attempt}), retrying...`);
+        }
       }
 
       // Stagger retries: 1-3s random delay per tab to avoid hammering
-      await wait(1000 + Math.random() * 2000);
+      const minDelay = Math.max(0, retryDelayMinMs);
+      const maxDelay = Math.max(minDelay, retryDelayMaxMs);
+      await wait(minDelay + Math.random() * (maxDelay - minDelay));
     }
     return null;
   }
@@ -153,7 +166,7 @@ async function raceLoadPage(browser, url, numTabs = 10) {
       attemptTab(pages[i], i).then(result => {
         if (result && !resolved) {
           resolved = true;
-          console.log(`[browser] Tab ${result.tabIndex + 1}/${numTabs} won with HTTP ${result.status}`);
+          console.log(`[browser] Tab ${result.tabIndex + 1}/${safeTabs} won with HTTP ${result.status}`);
           for (const p of pages) {
             if (p !== result.page) p.close().catch(() => {});
           }
@@ -162,6 +175,62 @@ async function raceLoadPage(browser, url, numTabs = 10) {
       });
     }
   });
+}
+
+// Open the same URL in multiple tabs and keep retrying each tab until all get HTTP 2xx.
+async function openUrlInMultipleTabs(browser, url, numTabs = 10, options = {}) {
+  const {
+    waitUntil = 'networkidle2',
+    timeout = NAVIGATION_TIMEOUT,
+    logEachTab = true,
+    retryDelayMinMs = 1000,
+    retryDelayMaxMs = 3000,
+  } = options;
+  const safeTabs = Math.max(1, parseInt(numTabs, 10) || 1);
+
+  console.log(`[browser] Opening ${safeTabs} tabs and waiting until all load with HTTP 2xx...`);
+
+  const pages = [];
+  for (let i = 0; i < safeTabs; i++) {
+    pages.push(await browser.newPage());
+  }
+
+  const results = await Promise.all(pages.map(async (p, idx) => {
+    let attempt = 0;
+    while (true) {
+      attempt++;
+      try {
+        const response = await p.goto(url, { waitUntil, timeout });
+        const status = response ? response.status() : 0;
+        if (status >= 200 && status < 300) {
+          if (logEachTab) {
+            console.log(`[browser] Cart tab ${idx + 1}/${safeTabs}: HTTP ${status} (loaded on attempt ${attempt})`);
+          }
+          return { page: p, tabIndex: idx, status, ok: true, attempts: attempt };
+        }
+
+        if (logEachTab) {
+          console.log(`[browser] Cart tab ${idx + 1}/${safeTabs}: HTTP ${status} (attempt ${attempt}), retrying...`);
+        }
+      } catch (err) {
+        if (logEachTab) {
+          console.log(`[browser] Cart tab ${idx + 1}/${safeTabs}: ${err.message} (attempt ${attempt}), retrying...`);
+        }
+      }
+
+      const minDelay = Math.max(0, retryDelayMinMs);
+      const maxDelay = Math.max(minDelay, retryDelayMaxMs);
+      await wait(minDelay + Math.random() * (maxDelay - minDelay));
+    }
+  }));
+
+  console.log(`[browser] All ${safeTabs} tabs loaded with HTTP 2xx.`);
+
+  return {
+    pages,
+    results,
+    firstOk: results.find(r => r.ok) || null,
+  };
 }
 
 // Retry loading a URL on a single page forever until HTTP 200
@@ -380,6 +449,9 @@ module.exports = {
   launchBrowser,
   waitForCloudflare,
   login,
+  raceLoadPage,
+  openUrlInMultipleTabs,
+  retryLoadPage,
   extractCookies,
   extractCurrentStore,
   extractCsrfToken,

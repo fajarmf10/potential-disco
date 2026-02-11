@@ -84,6 +84,12 @@ async function processCheckout(page) {
 
   console.log('[checkout] On checkout page: ' + page.url());
 
+  await processCheckoutPage(page);
+}
+
+// Process the checkout page after navigation (popups, payment, confirmation).
+// Assumes the browser is already on the checkout page.
+async function processCheckoutPage(page) {
   // Handle destination transaction popup if it appears
   await handleTransactionDestination(page);
 
@@ -360,4 +366,6 @@ module.exports = {
   syncCookiesToPage,
   verifyCart,
   processCheckout,
+  processCheckoutPage,
+  tryClickSelector,
 };

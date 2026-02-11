@@ -2,7 +2,7 @@
 const chalk = require('chalk');
 const config = require('./config');
 const { ask, close: closePrompt } = require('./lib/prompt');
-const { launchBrowser, login, extractCookies, extractCurrentStore, extractCsrfToken } = require('./lib/browser');
+const { launchBrowser, login, raceLoadPage, openUrlInMultipleTabs, retryLoadPage, extractCookies, extractCurrentStore, extractCsrfToken } = require('./lib/browser');
 const LogamMuliaAPI = require('./lib/api');
 const { syncCookiesToPage, verifyCart, processCheckout } = require('./lib/checkout');
 
@@ -186,6 +186,7 @@ async function main() {
   const browser = await launchBrowser({ useExisting: useBrowser, debugPort });
 
   let page;
+  let leaveBrowserOpen = false;
   if (useBrowser) {
     // Get the active page from existing browser
     const pages = await browser.pages();
@@ -214,7 +215,7 @@ async function main() {
 
     // Extract cookies and tokens AFTER navigating to the purchase page
     const cookies = await extractCookies(page);
-    const csrfToken = await extractCsrfToken(page);
+    let csrfToken = await extractCsrfToken(page);
 
     console.log(chalk.gray(`  Extracted ${cookies.length} cookies, CSRF token: ${csrfToken ? 'yes' : 'no'}`));
 
@@ -252,7 +253,10 @@ async function main() {
 
         // Re-extract CSRF token after page reload
         const newToken = await extractCsrfToken(page);
-        if (newToken) api.setCsrfToken(newToken);
+        if (newToken) {
+          csrfToken = newToken;
+          api.setCsrfToken(newToken);
+        }
       } else {
         // Normal mode: use API
         await api.changeLocation(storeCode);
@@ -296,7 +300,10 @@ async function main() {
           await new Promise(r => setTimeout(r, 2000));
 
           const newToken = await extractCsrfToken(page);
-          if (newToken) api.setCsrfToken(newToken);
+          if (newToken) {
+            csrfToken = newToken;
+            api.setCsrfToken(newToken);
+          }
         } else {
           await api.changeLocation(otherStore);
         }
@@ -328,13 +335,39 @@ async function main() {
       }
     }
 
-    // Step 6: Ask user what to buy
+    // Step 6: Start racing tabs and ask user what to buy in parallel
+    const purchaseUrl = config.BASE_URL + config.endpoints.purchasePage;
+    let fastPurchasePagePromise = null;
+    if (config.raceTabs > 1) {
+      console.log(chalk.cyan(`\n  Spinning ${config.raceTabs} tabs to wait for the first loaded purchase page...`));
+      console.log(chalk.gray('  You can enter gram + qty while tabs are loading.\n'));
+      fastPurchasePagePromise = raceLoadPage(browser, purchaseUrl, config.raceTabs, {
+        logAttempts: false,
+      });
+    }
+
     const cartItems = await promptCartItems(variants);
+
+    if (fastPurchasePagePromise) {
+      try {
+        const raceWinner = await fastPurchasePagePromise;
+        if (raceWinner && raceWinner !== page) {
+          // Free resources from the previous working tab after race winner is ready.
+          if (!useBrowser && !page.isClosed()) {
+            await page.close().catch(() => {});
+          }
+          page = raceWinner;
+          console.log(chalk.gray('  Fastest tab selected. Other racing tabs were closed.'));
+        }
+      } catch (err) {
+        console.log(chalk.yellow(`  Tab race failed, using current tab: ${err.message}`));
+      }
+    }
 
     if (cartItems.length === 0) {
       console.log(chalk.yellow('\n  No items selected. Exiting.'));
       closePrompt();
-      await browser.close();
+      if (!useBrowser) await browser.close();
       return;
     }
 
@@ -356,11 +389,20 @@ async function main() {
     if (!confirmed) {
       console.log(chalk.yellow('\n  Cancelled.'));
       closePrompt();
-      await browser.close();
+      if (!useBrowser) await browser.close();
       return;
     }
 
     closePrompt(); // Done with stdin - release it before checkout
+
+    // Refresh cookies/tokens from the winning tab right before API submit
+    const latestCookies = await extractCookies(page);
+    await api.importCookies(latestCookies);
+    const latestToken = await extractCsrfToken(page);
+    if (latestToken) {
+      csrfToken = latestToken;
+      api.setCsrfToken(latestToken);
+    }
 
     // Step 7: Add to cart
     console.log(chalk.cyan('\n  [6/6] Adding items to cart...'));
@@ -368,6 +410,35 @@ async function main() {
 
     if (cartResult.success) {
       console.log(chalk.green('  Cart updated! (HTTP ' + cartResult.status + ')'));
+
+      if (cartResult.is2xx) {
+        const cartUrl = config.BASE_URL + '/id' + config.endpoints.myCart;
+        if (config.raceTabs > 1) {
+          console.log(chalk.cyan(`  Opening ${config.raceTabs} tabs for ${cartUrl}...`));
+          try {
+            const cartTabs = await openUrlInMultipleTabs(browser, cartUrl, config.raceTabs, {
+              logEachTab: false,
+            });
+            if (cartTabs.firstOk && cartTabs.firstOk.page !== page) {
+              if (!useBrowser && !page.isClosed()) {
+                await page.close().catch(() => {});
+              }
+              page = cartTabs.firstOk.page;
+              console.log(chalk.gray(`  Cart tabs opened. Using tab ${cartTabs.firstOk.tabIndex + 1} as active tab.`));
+            }
+          } catch (err) {
+            console.log(chalk.yellow(`  Opening cart tabs failed, continuing with current tab: ${err.message}`));
+          }
+        } else {
+          page = await retryLoadPage(page, cartUrl);
+        }
+
+        // User wants cart tabs to stay open; stop before checkout.
+        leaveBrowserOpen = true;
+        console.log(chalk.green('  Cart tabs are open. Stopping before checkout to keep /cart open.'));
+        console.log(chalk.gray('  Press Ctrl+C when you are done.\n'));
+        await new Promise(() => {});
+      }
     } else {
       console.error(chalk.red('  Add-to-cart failed (HTTP ' + cartResult.status + ')'));
       console.log(chalk.yellow('  Attempting via browser fallback...'));
@@ -422,7 +493,7 @@ async function main() {
     }
   } finally {
     closePrompt();
-    if (!useBrowser) {
+    if (!useBrowser && !leaveBrowserOpen) {
       try { await browser.close(); } catch (e) {}
     } else {
       console.log(chalk.gray('\n  Left browser open (existing session).'));
