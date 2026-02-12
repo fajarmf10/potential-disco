@@ -4,7 +4,9 @@ const config = require('./config');
 const { ask, close: closePrompt } = require('./lib/prompt');
 const { launchBrowser, login, raceLoadPage, extractCookies, extractCurrentStore, extractCsrfToken } = require('./lib/browser');
 const LogamMuliaAPI = require('./lib/api');
-const { syncCookiesToPage } = require('./lib/checkout');
+const { runParallelCheckout } = require('./lib/checkout');
+
+const NAVIGATION_TIMEOUT = 60_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -394,7 +396,7 @@ async function main() {
 
     closePrompt(); // Done with stdin - release it before checkout
 
-    // Refresh cookies/tokens from the winning tab right before API submit
+    // Refresh cookies/tokens from the winning tab right before first add-to-cart
     const latestCookies = await extractCookies(page);
     await api.importCookies(latestCookies);
     const latestToken = await extractCsrfToken(page);
@@ -403,42 +405,86 @@ async function main() {
       api.setCsrfToken(latestToken);
     }
 
-    // Step 7: Add to cart
-    console.log(chalk.cyan('\n  [6/6] Adding items to cart...'));
-    const cartResult = await api.addToCart(itemsWithPrices, taxParams);
+    // -----------------------------------------------------------------------
+    // Main loop: add-to-cart → N tabs checkout → repeat until Ctrl+C
+    // -----------------------------------------------------------------------
+    const rounds = 2;
+    let cycle = 0;
 
-    if (cartResult.success) {
-      console.log(chalk.green('  Cart updated! (HTTP ' + cartResult.status + ')'));
-      console.log(chalk.green('\n  Items added to cart successfully.'));
-      console.log(chalk.cyan('  Run checkout-cart.js to proceed to checkout.\n'));
-    } else {
-      console.error(chalk.red('  Add-to-cart failed (HTTP ' + cartResult.status + ')'));
-      console.log(chalk.yellow('  Attempting via browser fallback...'));
+    while (true) {
+      cycle++;
 
-      await syncCookiesToPage(page, api);
-      await page.goto(config.BASE_URL + config.endpoints.purchasePage, {
-        waitUntil: 'networkidle2',
-        timeout: 30_000,
-      });
-
-      for (const item of itemsWithPrices) {
-        await page.evaluate((variantId, qty) => {
-          const input = document.querySelector(`#qty${variantId}`);
-          if (input) {
-            input.value = qty;
-            input.dispatchEvent(new Event('change'));
+      if (cycle > 1) {
+        // Refresh session tokens via a temporary page
+        console.log(chalk.yellow(`\n  --- Cycle ${cycle}: refreshing session ---`));
+        const tempPage = await browser.newPage();
+        try {
+          await tempPage.goto(config.BASE_URL + config.endpoints.purchasePage, {
+            waitUntil: 'networkidle2',
+            timeout: NAVIGATION_TIMEOUT,
+          });
+          const freshCookies = await extractCookies(tempPage);
+          await api.importCookies(freshCookies);
+          const freshToken = await extractCsrfToken(tempPage);
+          if (freshToken) {
+            csrfToken = freshToken;
+            api.setCsrfToken(freshToken);
           }
-        }, item.variantId, item.qty);
+        } catch (err) {
+          console.log(chalk.red(`  Token refresh failed: ${err.message}, retrying cycle...`));
+          continue;
+        } finally {
+          await tempPage.close().catch(() => {});
+        }
       }
 
-      await page.evaluate(() => {
-        document.querySelector('#purchase').submit();
-      });
+      // Add to cart (single process)
+      console.log(chalk.cyan(`\n  [cycle ${cycle}] Adding items to cart...`));
+      const cartResult = await api.addToCart(itemsWithPrices, taxParams);
 
-      await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30_000 }).catch(() => {});
-      console.log(chalk.green('  Cart submitted via browser.'));
-      console.log(chalk.cyan('  Run checkout-cart.js to proceed to checkout.\n'));
-    }
+      if (!cartResult.success) {
+        console.log(chalk.red(`  Add-to-cart failed (HTTP ${cartResult.status}), retrying...`));
+        continue;
+      }
+      console.log(chalk.green('  Cart updated! (HTTP ' + cartResult.status + ')'));
+
+      // Close ALL existing tabs — fresh tabs will be opened for checkout
+      const allPages = await browser.pages();
+      for (const p of allPages) {
+        if (!p.isClosed()) await p.close().catch(() => {});
+      }
+
+      // N tabs checkout
+      console.log(chalk.cyan(`  [cycle ${cycle}] Parallel checkout (${config.raceTabs} tabs x ${rounds} rounds)...`));
+      const results = await runParallelCheckout(browser, config.raceTabs, rounds);
+
+      // Summary
+      console.log(chalk.yellow('\n  ' + '='.repeat(40)));
+      console.log(chalk.bold(`  Cycle ${cycle} Results`));
+      console.log(chalk.yellow('  ' + '='.repeat(40)));
+
+      let successCount = 0;
+      for (const r of results) {
+        const status = r.success ? chalk.green('SUCCESS') : chalk.red('FAILED');
+        const detail = r.success
+          ? `${r.rounds || 1} round(s) in ${r.attempts} attempt(s)`
+          : r.reason || 'unknown';
+        console.log(`  Tab ${r.tabIndex + 1}: ${status} - ${detail}`);
+        if (r.success) successCount++;
+      }
+
+      const totalCheckouts = successCount * rounds;
+      console.log(chalk.bold(`\n  ${successCount}/${config.raceTabs} tabs completed (${totalCheckouts} total checkouts).`));
+
+      const cartEmpty = results.some(r => r.reason === 'cart_empty');
+      if (cartEmpty) {
+        console.log(chalk.yellow('  Cart emptied — re-adding items and retrying...'));
+      } else if (successCount > 0) {
+        console.log(chalk.green('  Cycle complete. Starting next cycle...'));
+      } else {
+        console.log(chalk.red('  No tabs completed. Retrying...'));
+      }
+    } // while(true) — Ctrl+C to stop
   } catch (err) {
     console.error(chalk.red('\n  Error: ' + err.message));
     if (err.stack) {

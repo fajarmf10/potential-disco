@@ -1,10 +1,20 @@
 const config = require('../config');
+const { saveSnapshot } = require('./snapshot');
 
-const NAVIGATION_TIMEOUT = 30_000;
+const NAVIGATION_TIMEOUT = 60_000;
 
 // Helper: wait for timeout
 async function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Dismiss any visible SweetAlert popup
+async function dismissSwal(page) {
+  return page.evaluate(() => {
+    const btn = document.querySelector('.swal-button--confirm, .swal-button');
+    if (btn) { btn.click(); return true; }
+    return false;
+  });
 }
 
 // Sync cookies from axios jar back into Puppeteer page
@@ -22,8 +32,6 @@ async function verifyCart(page) {
     waitUntil: 'networkidle2',
     timeout: NAVIGATION_TIMEOUT,
   });
-
-  await wait(2000);
 
   // Check if cart has items
   const cartInfo = await page.evaluate(() => {
@@ -80,7 +88,6 @@ async function processCheckout(page) {
   }
 
   await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: NAVIGATION_TIMEOUT }).catch(() => {});
-  await wait(2000);
 
   console.log('[checkout] On checkout page: ' + page.url());
 
@@ -153,14 +160,12 @@ async function handleTransactionDestination(page) {
         'button:has-text("Simpan")',
         'button:has-text("OK")',
       ]);
-      await wait(2000);
     }
   }
 }
 
 async function handlePaymentSelection(page) {
   console.log('[checkout] Looking for payment method selection...');
-  await wait(2000);
 
   const paymentMethod = config.paymentMethod;
 
@@ -190,7 +195,6 @@ async function handlePaymentSelection(page) {
 
   if (selected) {
     console.log(`[checkout] Selected payment method: ${paymentMethod}`);
-    await wait(1000);
 
     // Click proceed/confirm button
     await tryClickSelector(page, [
@@ -211,7 +215,6 @@ async function handlePaymentSelection(page) {
 
 async function handleOrderConfirmation(page) {
   console.log('[checkout] Checking for order confirmation...');
-  await wait(2000);
 
   const pageContent = await page.evaluate(() => {
     return {
@@ -255,7 +258,6 @@ async function handleOrderConfirmation(page) {
       '.swal-button--confirm',
     ]);
 
-    await wait(3000);
     await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: NAVIGATION_TIMEOUT }).catch(() => {});
 
     // Check result
@@ -362,10 +364,194 @@ async function waitForManualAction(page, timeout) {
   console.log('[checkout] Manual action timeout reached.');
 }
 
+// ---------------------------------------------------------------------------
+// Parallel checkout: N tabs each load /id/checkout and process independently
+// ---------------------------------------------------------------------------
+
+async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal) {
+  const tag = `[tab ${tabIndex + 1}/${totalTabs}]`;
+  const page = await browser.newPage();
+  const checkoutUrl = config.BASE_URL + '/id/checkout';
+  let attempt = 0;
+  let completedRounds = 0;
+
+  while (completedRounds < rounds) {
+    if (abortSignal.aborted) {
+      await page.close().catch(() => {});
+      return { tabIndex, success: false, reason: 'aborted', rounds: completedRounds };
+    }
+
+    attempt++;
+    const attemptTag = `${tag} round ${completedRounds + 1}/${rounds} attempt ${attempt}`;
+
+    try {
+      // 1. Load checkout page
+      console.log(`  ${attemptTag}: Loading /id/checkout...`);
+      const response = await page.goto(checkoutUrl, {
+        waitUntil: 'networkidle2',
+        timeout: NAVIGATION_TIMEOUT,
+      });
+
+      const status = response ? response.status() : 0;
+      if (status < 200 || status >= 300) {
+        console.log(`  ${attemptTag}: HTTP ${status}, retrying...`);
+        continue;
+      }
+
+      await saveSnapshot(page, `checkout-tab${tabIndex + 1}-attempt${attempt}`);
+
+      // 2. Check page has items and the checkout form
+      const pageState = await page.evaluate(() => {
+        const hasItems = document.querySelectorAll('.cart-item').length > 0;
+        const hasForm = document.querySelector('#checkout-form') !== null;
+        const hasBtn = document.querySelector('#btnContinueOrder') !== null;
+        const url = window.location.href;
+        const path = new URL(url).pathname;
+        const isHomePage = path === '/id' || path === '/id/';
+        const isCartPage = url.includes('/my-cart');
+        const isLoginPage = url.includes('/login') || url.includes('/popup-login');
+        return { hasItems, hasForm, hasBtn, url, isHomePage, isCartPage, isLoginPage };
+      });
+
+      if (pageState.isHomePage) {
+        console.log(`  ${attemptTag}: Redirected to home — cart is empty, aborting all tabs...`);
+        await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}-home-redirect`);
+        abortSignal.aborted = true;
+        await page.close().catch(() => {});
+        return { tabIndex, success: false, reason: 'cart_empty', rounds: completedRounds };
+      }
+
+      if (pageState.isCartPage || pageState.isLoginPage) {
+        console.log(`  ${attemptTag}: Redirected to ${pageState.url}, retrying...`);
+        continue;
+      }
+
+      if (!pageState.hasItems || !pageState.hasForm) {
+        console.log(`  ${attemptTag}: No items on checkout page, aborting all tabs...`);
+        await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}-empty`);
+        abortSignal.aborted = true;
+        await page.close().catch(() => {});
+        return { tabIndex, success: false, reason: 'cart_empty', rounds: completedRounds };
+      }
+
+      if (!pageState.hasBtn) {
+        console.log(`  ${attemptTag}: "Bayar Sekarang" button not found, retrying...`);
+        await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}-no-btn`);
+        continue;
+      }
+
+      // 3. Select pickup at butik
+      console.log(`  ${attemptTag}: Selecting butik pickup...`);
+      await page.evaluate(() => {
+        const radio = document.querySelector('input[name="pickCourier"].pick-store');
+        if (radio && !radio.checked) radio.click();
+      });
+
+      // Dismiss swal info popup (butik location confirmation)
+      await dismissSwal(page);
+
+      // 4. Check the "Saya setuju" T&C checkbox
+      console.log(`  ${attemptTag}: Checking T&C checkbox...`);
+      await page.evaluate(() => {
+        const cb = document.getElementById('confirmCheckout');
+        if (cb && !cb.checked) cb.checked = true;
+      });
+
+      // 5. Click "Bayar Sekarang" and wait for form submission
+      console.log(`  ${attemptTag}: Clicking "Bayar Sekarang"...`);
+
+      const navPromise = page.waitForNavigation({
+        waitUntil: 'networkidle2',
+        timeout: NAVIGATION_TIMEOUT,
+      }).catch(() => null);
+
+      await page.evaluate(() => {
+        document.getElementById('btnContinueOrder').click();
+      });
+
+      // Check for swal validation error (no navigation will happen)
+      const swalError = await page.evaluate(() => {
+        const overlay = document.querySelector('.swal-overlay--show-modal');
+        if (!overlay) return null;
+        const title = document.querySelector('.swal-title');
+        const text = document.querySelector('.swal-text');
+        return {
+          title: title ? title.textContent : '',
+          text: text ? text.textContent : '',
+        };
+      });
+
+      if (swalError) {
+        console.log(`  ${attemptTag}: SweetAlert: "${swalError.title}" - ${swalError.text}`);
+        await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}-swal`);
+        await dismissSwal(page);
+        continue;
+      }
+
+      // Wait for form POST navigation
+      const navResponse = await navPromise;
+
+      const navStatus = navResponse ? navResponse.status() : 0;
+      console.log(`  ${attemptTag}: Navigated to ${page.url()} (HTTP ${navStatus || 'unknown'})`);
+
+      if (navStatus && (navStatus < 200 || navStatus >= 300)) {
+        console.log(`  ${attemptTag}: Result page HTTP ${navStatus}, retrying...`);
+        await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}-http${navStatus}`);
+        continue;
+      }
+
+      await saveSnapshot(page, `result-tab${tabIndex + 1}-attempt${attempt}`);
+
+      // 6. Handle post-checkout (tujuan transaksi, payment, confirmation)
+      try {
+        await processCheckoutPage(page);
+        completedRounds++;
+        console.log(`  ${tag}: Round ${completedRounds}/${rounds} completed successfully!`);
+        await saveSnapshot(page, `confirmation-tab${tabIndex + 1}-round${completedRounds}`);
+
+        if (completedRounds >= rounds) {
+          await page.close().catch(() => {});
+          return { tabIndex, success: true, attempts: attempt, rounds: completedRounds };
+        }
+
+        // More rounds to go — loop back to checkout page
+        console.log(`  ${tag}: Starting next round...`);
+        continue;
+      } catch (err) {
+        console.log(`  ${attemptTag}: Post-checkout failed: ${err.message}`);
+        await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}-post`);
+        continue;
+      }
+    } catch (err) {
+      console.log(`  ${attemptTag}: Error: ${err.message}`);
+      await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}`).catch(() => {});
+      continue;
+    }
+  }
+}
+
+// Open N tabs and run checkout on all of them in parallel.
+// Each tab processes `rounds` successful checkouts before finishing.
+// Returns array of results. Every tab retries indefinitely until success or empty cart.
+async function runParallelCheckout(browser, numTabs, rounds = 1) {
+  const totalCheckouts = numTabs * rounds;
+  console.log(`  Opening ${numTabs} tabs for parallel checkout (${rounds} round(s) each = ${totalCheckouts} total)...`);
+  console.log(`  Each tab: /id/checkout → select pickup → agree T&C → Bayar Sekarang`);
+  console.log(`  All tabs retry indefinitely on failure.\n`);
+
+  const abortSignal = { aborted: false };
+  const promises = [];
+  for (let i = 0; i < numTabs; i++) {
+    promises.push(tabCheckoutLoop(browser, i, numTabs, rounds, abortSignal));
+  }
+  return Promise.all(promises);
+}
+
 module.exports = {
   syncCookiesToPage,
   verifyCart,
   processCheckout,
   processCheckoutPage,
   tryClickSelector,
+  runParallelCheckout,
 };
