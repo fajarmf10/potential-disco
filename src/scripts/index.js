@@ -2,9 +2,9 @@
 const chalk = require('chalk');
 const config = require('./config');
 const { ask, close: closePrompt } = require('./lib/prompt');
-const { launchBrowser, login, raceLoadPage, openUrlInMultipleTabs, retryLoadPage, extractCookies, extractCurrentStore, extractCsrfToken } = require('./lib/browser');
+const { launchBrowser, login, raceLoadPage, extractCookies, extractCurrentStore, extractCsrfToken } = require('./lib/browser');
 const LogamMuliaAPI = require('./lib/api');
-const { syncCookiesToPage, verifyCart, processCheckout } = require('./lib/checkout');
+const { syncCookiesToPage } = require('./lib/checkout');
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -186,7 +186,6 @@ async function main() {
   const browser = await launchBrowser({ useExisting: useBrowser, debugPort });
 
   let page;
-  let leaveBrowserOpen = false;
   if (useBrowser) {
     // Get the active page from existing browser
     const pages = await browser.pages();
@@ -410,35 +409,8 @@ async function main() {
 
     if (cartResult.success) {
       console.log(chalk.green('  Cart updated! (HTTP ' + cartResult.status + ')'));
-
-      if (cartResult.is2xx) {
-        const cartUrl = config.BASE_URL + '/id' + config.endpoints.myCart;
-        if (config.raceTabs > 1) {
-          console.log(chalk.cyan(`  Opening ${config.raceTabs} tabs for ${cartUrl}...`));
-          try {
-            const cartTabs = await openUrlInMultipleTabs(browser, cartUrl, config.raceTabs, {
-              logEachTab: false,
-            });
-            if (cartTabs.firstOk && cartTabs.firstOk.page !== page) {
-              if (!useBrowser && !page.isClosed()) {
-                await page.close().catch(() => {});
-              }
-              page = cartTabs.firstOk.page;
-              console.log(chalk.gray(`  Cart tabs opened. Using tab ${cartTabs.firstOk.tabIndex + 1} as active tab.`));
-            }
-          } catch (err) {
-            console.log(chalk.yellow(`  Opening cart tabs failed, continuing with current tab: ${err.message}`));
-          }
-        } else {
-          page = await retryLoadPage(page, cartUrl);
-        }
-
-        // User wants cart tabs to stay open; stop before checkout.
-        leaveBrowserOpen = true;
-        console.log(chalk.green('  Cart tabs are open. Stopping before checkout to keep /cart open.'));
-        console.log(chalk.gray('  Press Ctrl+C when you are done.\n'));
-        await new Promise(() => {});
-      }
+      console.log(chalk.green('\n  Items added to cart successfully.'));
+      console.log(chalk.cyan('  Run checkout-cart.js to proceed to checkout.\n'));
     } else {
       console.error(chalk.red('  Add-to-cart failed (HTTP ' + cartResult.status + ')'));
       console.log(chalk.yellow('  Attempting via browser fallback...'));
@@ -465,21 +437,7 @@ async function main() {
 
       await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30_000 }).catch(() => {});
       console.log(chalk.green('  Cart submitted via browser.'));
-    }
-
-    // Step 8: Checkout
-    console.log(chalk.cyan('  [7/7] Processing checkout...'));
-
-    await syncCookiesToPage(page, api);
-    await verifyCart(page);
-    await processCheckout(page);
-
-    console.log(chalk.green('\n  Automation complete.\n'));
-
-    if (!config.headless || useBrowser) {
-      console.log(chalk.gray('  Browser will stay open for 30 seconds...'));
-      console.log(chalk.gray('  Press Ctrl+C to exit now.\n'));
-      await new Promise(resolve => setTimeout(resolve, 30_000)).catch(() => {});
+      console.log(chalk.cyan('  Run checkout-cart.js to proceed to checkout.\n'));
     }
   } catch (err) {
     console.error(chalk.red('\n  Error: ' + err.message));
@@ -493,7 +451,7 @@ async function main() {
     }
   } finally {
     closePrompt();
-    if (!useBrowser && !leaveBrowserOpen) {
+    if (!useBrowser) {
       try { await browser.close(); } catch (e) {}
     } else {
       console.log(chalk.gray('\n  Left browser open (existing session).'));
