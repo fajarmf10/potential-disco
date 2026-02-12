@@ -1,5 +1,41 @@
 # Scripts
 
+## download_checkout_assets.py
+
+Downloads only JS and CSS assets for checkout pages into `src/checkout/` by default.
+Works with both:
+- `src/checkout/checkout.txt`
+- `src/checkout/Checkout _ Logam Mulia _ Gold, Silver and Precious Metal Trading Company.html`
+
+If Python TLS handshake fails on some hosts, it automatically retries with `curl`.
+
+**No extra dependencies** (uses Python standard library only).
+
+### Usage
+
+```bash
+# List what would be downloaded
+python download_checkout_assets.py --dry-run
+
+# Download JS/CSS assets into src/checkout/
+python download_checkout_assets.py
+
+# Download and rewrite checkout HTML to local relative paths
+python download_checkout_assets.py --rewrite
+```
+
+### Options
+
+| Option       | Description |
+|-------------|-------------|
+| `--html`    | Path to checkout HTML file |
+| `--out`     | Base output directory (default: `src/checkout/`) |
+| `--base-url`| Base URL for resolving relative links (default: `https://www.logammulia.com`) |
+| `--rewrite` | Rewrite asset links in the HTML to local relative paths |
+| `--dry-run` | Print targets without downloading |
+
+---
+
 ## download_cart_assets.py
 
 Downloads only JS and CSS assets referenced by `src/cart/index.html` into local folders (default base: `src/cart/`).
