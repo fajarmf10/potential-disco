@@ -5,6 +5,7 @@ const { ask, close: closePrompt } = require('./lib/prompt');
 const { launchBrowser, login, raceLoadPage, extractCookies, extractCurrentStore, extractCsrfToken } = require('./lib/browser');
 const LogamMuliaAPI = require('./lib/api');
 const { runParallelCheckout } = require('./lib/checkout');
+const { saveSnapshot } = require('./lib/snapshot');
 
 const NAVIGATION_TIMEOUT = 60_000;
 
@@ -203,6 +204,7 @@ async function main() {
   try {
     console.log(chalk.cyan('  [2/5] ' + (useBrowser ? 'Checking login status...' : 'Logging in (with Cloudflare bypass)...')));
     page = await login(page, { manualLogin: useBrowser, browser, raceTabs: config.raceTabs });
+    await saveSnapshot(page, 'after-login');
 
     // Step 3: Navigate to purchase page to ensure we're on the right domain and have fresh tokens
     console.log(chalk.cyan(`  [3/5] Navigating to purchase page...`));
@@ -213,6 +215,8 @@ async function main() {
         timeout: 30_000,
       });
     }
+
+    await saveSnapshot(page, 'purchase-page');
 
     // Extract cookies and tokens AFTER navigating to the purchase page
     const cookies = await extractCookies(page);
@@ -226,6 +230,7 @@ async function main() {
 
     // Step 4: Switch to selected store and fetch stock
     const currentStore = await extractCurrentStore(page);
+    console.log(chalk.gray(`  Detected store: ${currentStore || '(unknown)'}, wanted: ${storeCode}`));
     if (currentStore && currentStore === storeCode) {
       console.log(chalk.green(`  [4/5] Already at ${storeName} (${storeCode}), skipping location change`));
     } else {
@@ -258,6 +263,7 @@ async function main() {
           csrfToken = newToken;
           api.setCsrfToken(newToken);
         }
+        await saveSnapshot(page, 'after-store-switch');
       } else {
         // Normal mode: use API
         await api.changeLocation(storeCode);

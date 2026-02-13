@@ -422,13 +422,19 @@ async function extractCookies(page) {
 
 async function extractCurrentStore(page) {
   const store = await page.evaluate(() => {
-    // Look for var current_storage = 'XXXX' in script tags
+    // 1. Look for var current_storage = 'XXXX' in script tags
     const scripts = document.querySelectorAll('script');
     for (const script of scripts) {
       const text = script.textContent || '';
       const match = text.match(/current_storage\s*=\s*['"](\w+)['"]/);
       if (match) return match[1];
     }
+    // 2. Fallback: check the geoloc form's location input value
+    const locationInput = document.querySelector('#geoloc-change-location input[name="location"]');
+    if (locationInput && locationInput.value) return locationInput.value;
+    // 3. Fallback: check for a selected option in any location dropdown
+    const selected = document.querySelector('select[name="location"] option[selected]');
+    if (selected && selected.value) return selected.value;
     return null;
   });
   return store;

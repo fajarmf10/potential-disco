@@ -4,6 +4,7 @@ const { CookieJar, Cookie } = require('tough-cookie');
 const cheerio = require('cheerio');
 const FormData = require('form-data');
 const config = require('../config');
+const { saveHtml } = require('./snapshot');
 
 class LogamMuliaAPI {
   constructor() {
@@ -107,6 +108,7 @@ class LogamMuliaAPI {
 
     // Update CSRF/XSRF tokens from response
     if (response.data && typeof response.data === 'string') {
+      saveHtml(response.data, `api-change-location-${response.status}`);
       const $ = cheerio.load(response.data);
       const newToken = $('meta[name="_token"]').attr('content');
       if (newToken) this.csrfToken = newToken;
@@ -139,6 +141,8 @@ class LogamMuliaAPI {
       });
       html = response.data;
     }
+
+    saveHtml(html, 'api-fetch-prices');
 
     const $ = cheerio.load(html);
 
@@ -262,6 +266,10 @@ class LogamMuliaAPI {
           : JSON.stringify(err.response.data));
       }
       throw err;
+    }
+
+    if (response.data && typeof response.data === 'string') {
+      saveHtml(response.data, `api-add-to-cart-${response.status}`);
     }
 
     const is2xx = response.status >= 200 && response.status < 300;

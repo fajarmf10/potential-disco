@@ -31,4 +31,18 @@ async function saveSnapshot(page, label) {
   }
 }
 
-module.exports = { saveSnapshot };
+function saveHtml(html, label) {
+  try {
+    const dir = getRunDir();
+    const safeName = label.replace(/[^a-zA-Z0-9_-]/g, '_') + '.html';
+    const filePath = path.join(dir, safeName);
+    fs.writeFileSync(filePath, html, 'utf-8');
+    console.log(`[snapshot] Saved: ${path.relative(path.join(__dirname, '..'), filePath)}`);
+    return filePath;
+  } catch (err) {
+    console.log(`[snapshot] Failed to save "${label}": ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = { saveSnapshot, saveHtml };
