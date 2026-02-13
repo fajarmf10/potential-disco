@@ -2,7 +2,7 @@
 const chalk = require('chalk');
 const config = require('./config');
 const { ask, close: closePrompt } = require('./lib/prompt');
-const { launchBrowser, login, raceLoadPage, extractCookies, extractCurrentStore, extractCsrfToken } = require('./lib/browser');
+const { launchBrowser, login, raceLoadPage, extractCookies, extractCurrentStore, extractCsrfToken, clearBrowserState } = require('./lib/browser');
 const LogamMuliaAPI = require('./lib/api');
 const { runParallelCheckout } = require('./lib/checkout');
 const { saveSnapshot } = require('./lib/snapshot');
@@ -342,6 +342,13 @@ async function main() {
       }
     }
 
+    // Rate limit callback - asks user if they want to restart with fresh login
+    const onRateLimit = async (cooldownSec, resumeTime) => {
+      console.log(chalk.yellow(`\n  Rate limited by Cloudflare. Resuming at ${resumeTime}.`));
+      const answer = await ask(`  Restart with fresh login? (y = restart, n = wait and retry): `);
+      return answer.toLowerCase() === 'y' ? 'restart' : 'wait';
+    };
+
     // Step 6: Start racing tabs and ask user what to buy in parallel
     const purchaseUrl = config.BASE_URL + config.endpoints.purchasePage;
     let fastPurchasePagePromise = null;
@@ -350,6 +357,7 @@ async function main() {
       console.log(chalk.gray('  You can enter gram + qty while tabs are loading.\n'));
       fastPurchasePagePromise = raceLoadPage(browser, purchaseUrl, config.raceTabs, {
         logAttempts: false,
+        onRateLimit,
       });
     }
 
@@ -367,6 +375,9 @@ async function main() {
           console.log(chalk.gray('  Fastest tab selected. Other racing tabs were closed.'));
         }
       } catch (err) {
+        if (err.message === 'RATE_LIMITED_RESTART') {
+          throw err; // Propagate to outer restart handler
+        }
         console.log(chalk.yellow(`  Tab race failed, using current tab: ${err.message}`));
       }
     }
@@ -473,7 +484,13 @@ async function main() {
 
       // N tabs checkout
       console.log(chalk.cyan(`  [cycle ${cycle}] Parallel checkout (${config.raceTabs} tabs x ${rounds} rounds)...`));
-      const results = await runParallelCheckout(browser, config.raceTabs, rounds);
+      const results = await runParallelCheckout(browser, config.raceTabs, rounds, { onRateLimit });
+
+      // Check if user chose to restart due to rate limiting
+      const wantsRestart = results.some(r => r.reason === 'rate_limited_restart');
+      if (wantsRestart) {
+        throw new Error('RATE_LIMITED_RESTART');
+      }
 
       // Summary
       console.log(chalk.yellow('\n  ' + '='.repeat(40)));
@@ -503,6 +520,26 @@ async function main() {
       }
     } // while(true) — Ctrl+C to stop
   } catch (err) {
+    if (err.message === 'RATE_LIMITED_RESTART') {
+      console.log(chalk.yellow('\n  Restarting with fresh login...'));
+
+      // Close all extra tabs, keep one for clearing state
+      const allPages = await browser.pages();
+      let cleanupPage = allPages.find(p => !p.isClosed());
+      if (!cleanupPage) cleanupPage = await browser.newPage();
+      for (const p of allPages) {
+        if (p !== cleanupPage && !p.isClosed()) await p.close().catch(() => {});
+      }
+
+      // Clear cookies, local storage, session storage
+      await clearBrowserState(cleanupPage);
+      await cleanupPage.close().catch(() => {});
+
+      console.log(chalk.green('  Browser state cleared. Restarting...\n'));
+      closePrompt();
+      return main(); // Restart the whole flow
+    }
+
     console.error(chalk.red('\n  Error: ' + err.message));
     if (err.stack) {
       console.error(chalk.gray(err.stack.split('\n').slice(1, 4).join('\n')));

@@ -380,8 +380,9 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
   let completedRounds = 0;
 
   while (completedRounds < rounds) {
-    if (abortSignal.aborted) {
+    if (abortSignal.aborted || rateLimit.shouldRestart) {
       await page.close().catch(() => {});
+      if (rateLimit.shouldRestart) return { tabIndex, success: false, reason: 'rate_limited_restart', rounds: completedRounds };
       return { tabIndex, success: false, reason: 'aborted', rounds: completedRounds };
     }
 
@@ -390,8 +391,12 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
       const remaining = Math.ceil((rateLimit.cooldownUntil - Date.now()) / 1000);
       console.log(`  ${tag}: Waiting ${remaining}s for rate limit cooldown, resuming at ${formatTime(rateLimit.cooldownUntil)}`);
     }
-    while (rateLimit.cooldownUntil > Date.now() && !abortSignal.aborted) {
+    while (rateLimit.cooldownUntil > Date.now() && !abortSignal.aborted && !rateLimit.shouldRestart) {
       await wait(1000);
+    }
+    if (rateLimit.shouldRestart) {
+      await page.close().catch(() => {});
+      return { tabIndex, success: false, reason: 'rate_limited_restart', rounds: completedRounds };
     }
 
     attempt++;
@@ -413,6 +418,16 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
           const resumeAt = Date.now() + cooldownSec * 1000;
           console.log(`  ${attemptTag}: Rate limited (429). All tabs pausing for ${cooldownSec}s, resuming at ${formatTime(resumeAt)} (Retry-After: ${retryAfter || 'none, defaulting 60s'})`);
           rateLimit.cooldownUntil = resumeAt;
+
+          if (rateLimit.onRateLimit && !rateLimit.prompted) {
+            rateLimit.prompted = true;
+            rateLimit.onRateLimit(cooldownSec, formatTime(resumeAt)).then(action => {
+              if (action === 'restart') {
+                rateLimit.shouldRestart = true;
+                rateLimit.cooldownUntil = 0;
+              }
+            }).catch(() => {});
+          }
         }
         continue;
       }
@@ -556,14 +571,19 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
 // Open N tabs and run checkout on all of them in parallel.
 // Each tab processes `rounds` successful checkouts before finishing.
 // Returns array of results. Every tab retries indefinitely until success or empty cart.
-async function runParallelCheckout(browser, numTabs, rounds = 1) {
+async function runParallelCheckout(browser, numTabs, rounds = 1, options = {}) {
   const totalCheckouts = numTabs * rounds;
   console.log(`  Opening ${numTabs} tabs for parallel checkout (${rounds} round(s) each = ${totalCheckouts} total)...`);
   console.log(`  Each tab: /id/checkout → select pickup → agree T&C → Bayar Sekarang`);
   console.log(`  All tabs retry indefinitely on failure.\n`);
 
   const abortSignal = { aborted: false };
-  const rateLimit = { cooldownUntil: 0, consecutive429: 0 };
+  const rateLimit = {
+    cooldownUntil: 0,
+    shouldRestart: false,
+    prompted: false,
+    onRateLimit: options.onRateLimit || null,
+  };
   const promises = [];
   for (let i = 0; i < numTabs; i++) {
     promises.push(tabCheckoutLoop(browser, i, numTabs, rounds, abortSignal, rateLimit));

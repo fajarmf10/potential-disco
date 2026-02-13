@@ -118,6 +118,7 @@ async function raceLoadPage(browser, url, numTabs = 10, options = {}) {
     logAttempts = true,
     retryDelayMinMs = 1000,
     retryDelayMaxMs = 3000,
+    onRateLimit = null,
   } = options;
   const safeTabs = Math.max(1, parseInt(numTabs, 10) || 1);
 
@@ -131,20 +132,21 @@ async function raceLoadPage(browser, url, numTabs = 10, options = {}) {
   let resolved = false;
 
   // Shared rate-limit state across all tabs
-  const rl = { cooldownUntil: 0 };
+  const rl = { cooldownUntil: 0, shouldRestart: false, prompted: false };
 
   async function attemptTab(p, tabIndex) {
     let attempt = 0;
-    while (!resolved) {
+    while (!resolved && !rl.shouldRestart) {
       // Wait for any active rate-limit cooldown
       if (rl.cooldownUntil > Date.now()) {
         if (tabIndex === 0) {
           const remaining = Math.ceil((rl.cooldownUntil - Date.now()) / 1000);
           console.log(`[browser] Tab ${tabIndex + 1}: Waiting ${remaining}s for rate limit cooldown, resuming at ${formatTime(rl.cooldownUntil)}`);
         }
-        while (rl.cooldownUntil > Date.now() && !resolved) {
+        while (rl.cooldownUntil > Date.now() && !resolved && !rl.shouldRestart) {
           await wait(1000);
         }
+        if (rl.shouldRestart) return null;
       }
 
       attempt++;
@@ -170,6 +172,17 @@ async function raceLoadPage(browser, url, numTabs = 10, options = {}) {
             const resumeAt = Date.now() + cooldownSec * 1000;
             console.log(`[browser] Rate limited (429). All tabs pausing for ${cooldownSec}s, resuming at ${formatTime(resumeAt)} (Retry-After: ${retryAfter || 'none, defaulting 60s'})`);
             rl.cooldownUntil = resumeAt;
+
+            // Ask user if they want to restart (once, non-blocking for other tabs)
+            if (onRateLimit && !rl.prompted) {
+              rl.prompted = true;
+              onRateLimit(cooldownSec, formatTime(resumeAt)).then(action => {
+                if (action === 'restart') {
+                  rl.shouldRestart = true;
+                  rl.cooldownUntil = 0;
+                }
+              }).catch(() => {});
+            }
           }
           continue;
         }
@@ -192,9 +205,15 @@ async function raceLoadPage(browser, url, numTabs = 10, options = {}) {
     return null;
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     for (let i = 0; i < pages.length; i++) {
       attemptTab(pages[i], i).then(result => {
+        if (rl.shouldRestart && !resolved) {
+          resolved = true;
+          for (const p of pages) p.close().catch(() => {});
+          reject(new Error('RATE_LIMITED_RESTART'));
+          return;
+        }
         if (result && !resolved) {
           resolved = true;
           console.log(`[browser] Tab ${result.tabIndex + 1}/${safeTabs} won with HTTP ${result.status}`);
@@ -216,6 +235,7 @@ async function openUrlInMultipleTabs(browser, url, numTabs = 10, options = {}) {
     logEachTab = true,
     retryDelayMinMs = 1000,
     retryDelayMaxMs = 3000,
+    onRateLimit = null,
   } = options;
   const safeTabs = Math.max(1, parseInt(numTabs, 10) || 1);
 
@@ -227,20 +247,21 @@ async function openUrlInMultipleTabs(browser, url, numTabs = 10, options = {}) {
   }
 
   // Shared rate-limit state across all tabs
-  const rl = { cooldownUntil: 0 };
+  const rl = { cooldownUntil: 0, shouldRestart: false, prompted: false };
 
   const results = await Promise.all(pages.map(async (p, idx) => {
     let attempt = 0;
-    while (true) {
+    while (!rl.shouldRestart) {
       // Wait for any active rate-limit cooldown
       if (rl.cooldownUntil > Date.now()) {
         if (idx === 0) {
           const remaining = Math.ceil((rl.cooldownUntil - Date.now()) / 1000);
           console.log(`[browser] Cart tab ${idx + 1}: Waiting ${remaining}s for rate limit cooldown, resuming at ${formatTime(rl.cooldownUntil)}`);
         }
-        while (rl.cooldownUntil > Date.now()) {
+        while (rl.cooldownUntil > Date.now() && !rl.shouldRestart) {
           await wait(1000);
         }
+        if (rl.shouldRestart) return { page: p, tabIndex: idx, status: 429, ok: false, attempts: attempt, rateLimited: true };
       }
 
       attempt++;
@@ -261,6 +282,16 @@ async function openUrlInMultipleTabs(browser, url, numTabs = 10, options = {}) {
             const resumeAt = Date.now() + cooldownSec * 1000;
             console.log(`[browser] Rate limited (429). All tabs pausing for ${cooldownSec}s, resuming at ${formatTime(resumeAt)} (Retry-After: ${retryAfter || 'none, defaulting 60s'})`);
             rl.cooldownUntil = resumeAt;
+
+            if (onRateLimit && !rl.prompted) {
+              rl.prompted = true;
+              onRateLimit(cooldownSec, formatTime(resumeAt)).then(action => {
+                if (action === 'restart') {
+                  rl.shouldRestart = true;
+                  rl.cooldownUntil = 0;
+                }
+              }).catch(() => {});
+            }
           }
           continue;
         }
@@ -278,6 +309,7 @@ async function openUrlInMultipleTabs(browser, url, numTabs = 10, options = {}) {
       const maxDelay = Math.max(minDelay, retryDelayMaxMs);
       await wait(minDelay + Math.random() * (maxDelay - minDelay));
     }
+    return { page: p, tabIndex: idx, status: 429, ok: false, attempts: attempt, rateLimited: true };
   }));
 
   console.log(`[browser] All ${safeTabs} tabs loaded with HTTP 2xx.`);
@@ -507,6 +539,27 @@ async function extractCsrfToken(page) {
   return token;
 }
 
+// Clear all cookies and local/session storage for a fresh start
+async function clearBrowserState(page) {
+  console.log('[browser] Clearing cookies, local storage, and session storage...');
+  try {
+    const client = await page.target().createCDPSession();
+    await client.send('Network.clearBrowserCookies');
+    await client.detach();
+  } catch (e) {
+    // Fallback: delete cookies via Puppeteer API
+    const cookies = await page.cookies();
+    if (cookies.length > 0) {
+      await page.deleteCookie(...cookies);
+    }
+  }
+  await page.evaluate(() => {
+    try { localStorage.clear(); } catch (e) {}
+    try { sessionStorage.clear(); } catch (e) {}
+  });
+  console.log('[browser] Browser state cleared');
+}
+
 module.exports = {
   launchBrowser,
   waitForCloudflare,
@@ -517,4 +570,5 @@ module.exports = {
   extractCookies,
   extractCurrentStore,
   extractCsrfToken,
+  clearBrowserState,
 };
