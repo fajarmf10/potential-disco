@@ -420,33 +420,44 @@ async function main() {
     while (true) {
       cycle++;
 
+      // activePage is the page we'll use for browser-based add-to-cart
+      let activePage = page;
+
       if (cycle > 1) {
-        // Refresh session tokens via a temporary page
+        // Refresh session tokens via a new page
         console.log(chalk.yellow(`\n  --- Cycle ${cycle}: refreshing session ---`));
-        const tempPage = await browser.newPage();
+        activePage = await browser.newPage();
         try {
-          await tempPage.goto(config.BASE_URL + config.endpoints.purchasePage, {
+          await activePage.goto(config.BASE_URL + config.endpoints.purchasePage, {
             waitUntil: 'networkidle2',
             timeout: NAVIGATION_TIMEOUT,
           });
-          const freshCookies = await extractCookies(tempPage);
+          const freshCookies = await extractCookies(activePage);
           await api.importCookies(freshCookies);
-          const freshToken = await extractCsrfToken(tempPage);
+          const freshToken = await extractCsrfToken(activePage);
           if (freshToken) {
             csrfToken = freshToken;
             api.setCsrfToken(freshToken);
           }
         } catch (err) {
           console.log(chalk.red(`  Token refresh failed: ${err.message}, retrying cycle...`));
+          await activePage.close().catch(() => {});
           continue;
-        } finally {
-          await tempPage.close().catch(() => {});
+        }
+        // Don't close activePage yet - we may need it for browser-based add-to-cart
+        if (!useBrowser) {
+          await activePage.close().catch(() => {});
         }
       }
 
-      // Add to cart (single process)
+      // Add to cart
       console.log(chalk.cyan(`\n  [cycle ${cycle}] Adding items to cart...`));
-      const cartResult = await api.addToCart(itemsWithPrices, taxParams);
+      let cartResult;
+      if (useBrowser) {
+        cartResult = await api.addToCartViaBrowser(activePage, itemsWithPrices, taxParams);
+      } else {
+        cartResult = await api.addToCart(itemsWithPrices, taxParams);
+      }
 
       if (!cartResult.success) {
         console.log(chalk.red(`  Add-to-cart failed (HTTP ${cartResult.status}), retrying...`));

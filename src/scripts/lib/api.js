@@ -320,6 +320,102 @@ class LogamMuliaAPI {
     };
   }
 
+  // Add items to cart via browser's fetch (bypasses Cloudflare)
+  async addToCartViaBrowser(page, items, taxParams) {
+    if (!this.csrfToken) {
+      throw new Error('No CSRF token available. Call fetchPricesAndStock() first.');
+    }
+
+    console.log('[api] Adding items to cart via browser fetch...');
+    console.log('[api] CSRF token:', this.csrfToken ? this.csrfToken.substring(0, 20) + '...' : 'MISSING');
+    console.log('[api] Items:', items.map(i => `${i.name} x${i.qty}`).join(', '));
+
+    const formItems = config.VARIANTS.map(v => {
+      const cartItem = items.find(i => i.variantId === v.id);
+      return { id: String(v.id), qty: String(cartItem ? cartItem.qty : 0) };
+    });
+
+    let grandTotal = 0;
+    for (const item of items) {
+      if (item.price) grandTotal += item.price * item.qty;
+    }
+    console.log('[api] Grand total:', grandTotal);
+
+    const result = await page.evaluate(async (csrfToken, formItems, grandTotal, taxParams, currentUrl, endpoint) => {
+      const formData = new FormData();
+      formData.append('_token', csrfToken);
+
+      for (const item of formItems) {
+        formData.append('id_variant[]', item.id);
+        formData.append('qty[]', item.qty);
+      }
+
+      formData.append('grand_total', String(grandTotal));
+      formData.append('tax_type', taxParams.taxType || 'PPH22');
+      formData.append('tax_rate_npwp', String(taxParams.taxRateNpwp || 0));
+      formData.append('tax_rate_non_npwp', String(taxParams.taxRateNonNpwp || 0));
+      formData.append('tax_number', taxParams.taxNumber || 'off');
+      formData.append('ppn_rate', String(taxParams.ppnRate || 12));
+      formData.append('dpp_rate', String(taxParams.dppRate || 0.91666666666667));
+      formData.append('hemat_brankas', String(taxParams.hematBrankas || 10));
+      formData.append('current_url', currentUrl);
+
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          body: formData,
+          credentials: 'same-origin',
+        });
+
+        const text = await response.text();
+        return {
+          status: response.status,
+          ok: response.ok,
+          redirected: response.redirected,
+          url: response.url,
+          body: text.substring(0, 5000),
+        };
+      } catch (err) {
+        return { error: err.message, status: 0 };
+      }
+    }, this.csrfToken, formItems, grandTotal, taxParams,
+       config.BASE_URL + config.endpoints.purchasePage,
+       config.endpoints.addToCartMultiple);
+
+    if (result.error) {
+      console.error('[api] Browser fetch error:', result.error);
+      return { success: false, status: 0 };
+    }
+
+    console.log('[api] Response status:', result.status);
+    console.log('[api] Response URL:', result.url);
+
+    if (result.body) {
+      saveHtml(result.body, `api-add-to-cart-browser-${result.status}`);
+    }
+
+    const is2xx = result.status >= 200 && result.status < 300;
+    const success = is2xx || result.status === 302 || result.redirected;
+
+    if (!success) {
+      console.error('[api] Response body (first 2000 chars):', result.body?.substring(0, 2000));
+    }
+
+    // Update CSRF token from response if present
+    if (result.body) {
+      const $ = cheerio.load(result.body);
+      const newToken = $('meta[name="_token"]').attr('content');
+      if (newToken) this.csrfToken = newToken;
+    }
+
+    return {
+      success,
+      is2xx,
+      status: result.status,
+      redirectedTo: result.url,
+    };
+  }
+
   // Export cookies back to a format Puppeteer can use
   async exportCookies() {
     const cookies = await this.jar.getCookies(config.BASE_URL);
