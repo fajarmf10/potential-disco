@@ -236,7 +236,7 @@ async function openUrlInMultipleTabs(browser, url, numTabs = 10, options = {}) {
       if (rl.cooldownUntil > Date.now()) {
         if (idx === 0) {
           const remaining = Math.ceil((rl.cooldownUntil - Date.now()) / 1000);
-          console.log(`[browser] Cart tab ${idx + 1}: Waiting ${remaining}s for rate limit cooldown...`);
+          console.log(`[browser] Cart tab ${idx + 1}: Waiting ${remaining}s for rate limit cooldown, resuming at ${formatTime(rl.cooldownUntil)}`);
         }
         while (rl.cooldownUntil > Date.now()) {
           await wait(1000);
@@ -258,8 +258,9 @@ async function openUrlInMultipleTabs(browser, url, numTabs = 10, options = {}) {
           if (rl.cooldownUntil <= Date.now()) {
             const retryAfter = response.headers()['retry-after'];
             const cooldownSec = retryAfter ? parseInt(retryAfter, 10) || 60 : 60;
-            console.log(`[browser] Rate limited (429). All tabs pausing for ${cooldownSec}s (Retry-After: ${retryAfter || 'none, defaulting 60s'})...`);
-            rl.cooldownUntil = Date.now() + cooldownSec * 1000;
+            const resumeAt = Date.now() + cooldownSec * 1000;
+            console.log(`[browser] Rate limited (429). All tabs pausing for ${cooldownSec}s, resuming at ${formatTime(resumeAt)} (Retry-After: ${retryAfter || 'none, defaulting 60s'})`);
+            rl.cooldownUntil = resumeAt;
           }
           continue;
         }

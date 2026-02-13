@@ -8,6 +8,10 @@ async function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function formatTime(ts) {
+  return new Date(ts).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
 // Dismiss any visible SweetAlert popup
 async function dismissSwal(page) {
   return page.evaluate(() => {
@@ -382,6 +386,10 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
     }
 
     // Wait for any active rate-limit cooldown
+    if (rateLimit.cooldownUntil > Date.now() && tabIndex === 0) {
+      const remaining = Math.ceil((rateLimit.cooldownUntil - Date.now()) / 1000);
+      console.log(`  ${tag}: Waiting ${remaining}s for rate limit cooldown, resuming at ${formatTime(rateLimit.cooldownUntil)}`);
+    }
     while (rateLimit.cooldownUntil > Date.now() && !abortSignal.aborted) {
       await wait(1000);
     }
@@ -402,8 +410,9 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
         if (rateLimit.cooldownUntil <= Date.now()) {
           const retryAfter = response.headers()['retry-after'];
           const cooldownSec = retryAfter ? parseInt(retryAfter, 10) || 60 : 60;
-          console.log(`  ${attemptTag}: Rate limited (429). All tabs pausing for ${cooldownSec}s (Retry-After: ${retryAfter || 'none, defaulting 60s'})...`);
-          rateLimit.cooldownUntil = Date.now() + cooldownSec * 1000;
+          const resumeAt = Date.now() + cooldownSec * 1000;
+          console.log(`  ${attemptTag}: Rate limited (429). All tabs pausing for ${cooldownSec}s, resuming at ${formatTime(resumeAt)} (Retry-After: ${retryAfter || 'none, defaulting 60s'})`);
+          rateLimit.cooldownUntil = resumeAt;
         }
         continue;
       }
