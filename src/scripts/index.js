@@ -2,7 +2,7 @@
 const chalk = require('chalk');
 const config = require('./config');
 const { ask, close: closePrompt } = require('./lib/prompt');
-const { launchBrowser, login, raceLoadPage, extractCookies, extractCurrentStore, extractCsrfToken, clearBrowserState } = require('./lib/browser');
+const { launchBrowser, login, raceLoadPage, retryLoadPage, extractCookies, extractCurrentStore, extractCsrfToken, clearBrowserState } = require('./lib/browser');
 const LogamMuliaAPI = require('./lib/api');
 const { runParallelCheckout } = require('./lib/checkout');
 const { saveSnapshot } = require('./lib/snapshot');
@@ -201,19 +201,27 @@ async function main() {
     page = await browser.newPage();
   }
 
+  // Rate limit callback - asks user if they want to restart with fresh login
+  const onRateLimit = async (cooldownSec, resumeTime) => {
+    console.log(chalk.yellow(`\n  Rate limited by Cloudflare. Resuming at ${resumeTime}.`));
+    const answer = await ask(`  Restart with fresh login? (y = restart, n = wait and retry): `);
+    return answer.toLowerCase() === 'y' ? 'restart' : 'wait';
+  };
+
+  // Session loop: allows restarting from login on rate-limit restart
+  let sessionRestart = true;
+  while (sessionRestart) {
+  sessionRestart = false;
   try {
     console.log(chalk.cyan('  [2/5] ' + (useBrowser ? 'Checking login status...' : 'Logging in (with Cloudflare bypass)...')));
-    page = await login(page, { manualLogin: useBrowser, browser, raceTabs: config.raceTabs });
+    page = await login(page, { manualLogin: useBrowser, browser, raceTabs: config.raceTabs, onRateLimit });
     await saveSnapshot(page, 'after-login');
 
     // Step 3: Navigate to purchase page to ensure we're on the right domain and have fresh tokens
     console.log(chalk.cyan(`  [3/5] Navigating to purchase page...`));
     const currentUrl = page.url();
     if (!currentUrl.includes('/purchase/gold')) {
-      await page.goto(config.BASE_URL + config.endpoints.purchasePage, {
-        waitUntil: 'networkidle2',
-        timeout: 30_000,
-      });
+      await retryLoadPage(page, config.BASE_URL + config.endpoints.purchasePage, { onRateLimit });
     }
 
     await saveSnapshot(page, 'purchase-page');
@@ -341,13 +349,6 @@ async function main() {
         return;
       }
     }
-
-    // Rate limit callback - asks user if they want to restart with fresh login
-    const onRateLimit = async (cooldownSec, resumeTime) => {
-      console.log(chalk.yellow(`\n  Rate limited by Cloudflare. Resuming at ${resumeTime}.`));
-      const answer = await ask(`  Restart with fresh login? (y = restart, n = wait and retry): `);
-      return answer.toLowerCase() === 'y' ? 'restart' : 'wait';
-    };
 
     // Step 6: Start racing tabs and ask user what to buy in parallel
     const purchaseUrl = config.BASE_URL + config.endpoints.purchasePage;
@@ -521,7 +522,7 @@ async function main() {
     } // while(true) — Ctrl+C to stop
   } catch (err) {
     if (err.message === 'RATE_LIMITED_RESTART') {
-      console.log(chalk.yellow('\n  Restarting with fresh login...'));
+      console.log(chalk.yellow('\n  Clearing logammulia.com site data and restarting session...'));
 
       // Close all extra tabs, keep one for clearing state
       const allPages = await browser.pages();
@@ -531,13 +532,13 @@ async function main() {
         if (p !== cleanupPage && !p.isClosed()) await p.close().catch(() => {});
       }
 
-      // Clear cookies, local storage, session storage
+      // Clear cookies, storage, cache for logammulia.com only
       await clearBrowserState(cleanupPage);
-      await cleanupPage.close().catch(() => {});
+      page = cleanupPage;
 
-      console.log(chalk.green('  Browser state cleared. Restarting...\n'));
-      closePrompt();
-      return main(); // Restart the whole flow
+      console.log(chalk.green('  Site data cleared. Please re-login in the browser.\n'));
+      sessionRestart = true;
+      continue; // Loop back to login
     }
 
     console.error(chalk.red('\n  Error: ' + err.message));
@@ -549,13 +550,14 @@ async function main() {
       console.log(chalk.yellow('\n  Browser left open for debugging. Press Ctrl+C to exit.\n'));
       await new Promise(() => {});
     }
-  } finally {
-    closePrompt();
-    if (!useBrowser) {
-      try { await browser.close(); } catch (e) {}
-    } else {
-      console.log(chalk.gray('\n  Left browser open (existing session).'));
-    }
+  }
+  } // end session loop
+
+  closePrompt();
+  if (!useBrowser) {
+    try { await browser.close(); } catch (e) {}
+  } else {
+    console.log(chalk.gray('\n  Left browser open (existing session).'));
   }
 }
 

@@ -321,9 +321,13 @@ async function openUrlInMultipleTabs(browser, url, numTabs = 10, options = {}) {
   };
 }
 
-// Retry loading a URL on a single page forever until HTTP 200
-async function retryLoadPage(page, url) {
+// Retry loading a URL on a single page forever until HTTP 2xx.
+// Handles 429 with Retry-After header and optional onRateLimit callback.
+async function retryLoadPage(page, url, options = {}) {
+  const { onRateLimit = null } = options;
   let attempt = 0;
+  let shouldRestart = false;
+
   while (true) {
     attempt++;
     try {
@@ -337,10 +341,35 @@ async function retryLoadPage(page, url) {
         return page;
       }
 
+      if (status === 429) {
+        const retryAfter = response.headers()['retry-after'];
+        const cooldownSec = retryAfter ? parseInt(retryAfter, 10) || 60 : 60;
+        const resumeAt = Date.now() + cooldownSec * 1000;
+        console.log(`[browser] Rate limited (429). Pausing for ${cooldownSec}s, resuming at ${formatTime(resumeAt)} (Retry-After: ${retryAfter || 'none, defaulting 60s'})`);
+
+        if (onRateLimit) {
+          // Ask user in parallel with cooldown wait
+          const userChoice = onRateLimit(cooldownSec, formatTime(resumeAt));
+          userChoice.then(action => {
+            if (action === 'restart') shouldRestart = true;
+          }).catch(() => {});
+        }
+
+        // Wait for cooldown
+        while (Date.now() < resumeAt && !shouldRestart) {
+          await wait(1000);
+        }
+        if (shouldRestart) {
+          throw new Error('RATE_LIMITED_RESTART');
+        }
+        continue;
+      }
+
       const delay = Math.min(attempt * 2000, 10_000);
       console.log(`[browser] Got HTTP ${status}, retrying in ${delay / 1000}s (attempt ${attempt})...`);
       await wait(delay);
     } catch (err) {
+      if (err.message === 'RATE_LIMITED_RESTART') throw err;
       const delay = Math.min(attempt * 2000, 10_000);
       console.log(`[browser] ${err.message}, retrying in ${delay / 1000}s (attempt ${attempt})...`);
       await wait(delay);
@@ -349,30 +378,49 @@ async function retryLoadPage(page, url) {
 }
 
 async function login(page, options = {}) {
-  const { skipIfLoggedIn = true, manualLogin = false, browser = null, raceTabs = 1 } = options;
+  const { skipIfLoggedIn = true, manualLogin = false, browser = null, raceTabs = 1, onRateLimit = null } = options;
 
   // Navigate to the purchase page first (triggers CF challenge if needed)
   const currentUrl = page.url();
-  if (!currentUrl.includes('/purchase/gold')) {
+  const needsNavigation = !currentUrl.includes('/purchase/gold');
+
+  // Even if URL looks right, check if the page is actually loaded (not a CF block page)
+  let pageIsBlocked = false;
+  if (!needsNavigation) {
+    pageIsBlocked = await page.evaluate(() => {
+      const title = document.title || '';
+      const body = document.body ? document.body.textContent : '';
+      return title.includes('Attention Required') ||
+             body.includes('you have been blocked') ||
+             body.includes('enable cookies') ||
+             body.includes('Cloudflare Ray ID');
+    });
+    if (pageIsBlocked) {
+      console.log('[browser] Page is showing a Cloudflare block/rate-limit page. Reloading...');
+    }
+  }
+
+  if (needsNavigation || pageIsBlocked) {
     const url = config.BASE_URL + config.endpoints.purchasePage;
 
-    if (browser && raceTabs > 1) {
-      // Race multiple tabs for faster loading
+    if (browser && raceTabs > 1 && !pageIsBlocked) {
+      // Race multiple tabs for faster loading (skip racing if blocked - would just spam 429s)
       try {
-        const winningPage = await raceLoadPage(browser, url, raceTabs);
+        const winningPage = await raceLoadPage(browser, url, raceTabs, options);
         // Close the original page unless we're in manual login mode (user's tab)
         if (winningPage !== page && !manualLogin) {
           page.close().catch(() => {});
         }
         page = winningPage;
       } catch (err) {
+        if (err.message === 'RATE_LIMITED_RESTART') throw err;
         console.log(`[browser] Race failed: ${err.message}`);
         console.log('[browser] Falling back to single-tab retry...');
-        page = await retryLoadPage(page, url);
+        page = await retryLoadPage(page, url, options);
       }
     } else {
-      // Single tab with retry
-      page = await retryLoadPage(page, url);
+      // Single tab with retry (also handles 429 with onRateLimit callback)
+      page = await retryLoadPage(page, url, options);
     }
   }
 
@@ -539,25 +587,32 @@ async function extractCsrfToken(page) {
   return token;
 }
 
-// Clear all cookies and local/session storage for a fresh start
+// Clear logammulia.com cookies, cache, local/session storage for a fresh start
 async function clearBrowserState(page) {
-  console.log('[browser] Clearing cookies, local storage, and session storage...');
+  console.log('[browser] Clearing logammulia.com cookies, storage, and cache...');
+
+  // Delete only logammulia.com cookies (not all browser cookies)
+  const cookies = await page.cookies('https://logammulia.com', 'https://www.logammulia.com');
+  if (cookies.length > 0) {
+    await page.deleteCookie(...cookies);
+    console.log(`[browser] Deleted ${cookies.length} logammulia.com cookies`);
+  }
+
+  // Clear site cache via CDP
   try {
     const client = await page.target().createCDPSession();
-    await client.send('Network.clearBrowserCookies');
+    await client.send('Network.clearBrowserCache');
     await client.detach();
   } catch (e) {
-    // Fallback: delete cookies via Puppeteer API
-    const cookies = await page.cookies();
-    if (cookies.length > 0) {
-      await page.deleteCookie(...cookies);
-    }
+    // Non-fatal - cache clearing is best-effort
   }
+
+  // Clear localStorage and sessionStorage (already origin-scoped to current page)
   await page.evaluate(() => {
     try { localStorage.clear(); } catch (e) {}
     try { sessionStorage.clear(); } catch (e) {}
   });
-  console.log('[browser] Browser state cleared');
+  console.log('[browser] logammulia.com state cleared');
 }
 
 module.exports = {
