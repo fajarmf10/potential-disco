@@ -12,6 +12,10 @@ async function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function formatTime(ts) {
+  return new Date(ts).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
 async function launchBrowser(options = {}) {
   const { useExisting = false, debugPort = null } = options;
 
@@ -126,9 +130,23 @@ async function raceLoadPage(browser, url, numTabs = 10, options = {}) {
 
   let resolved = false;
 
+  // Shared rate-limit state across all tabs
+  const rl = { cooldownUntil: 0 };
+
   async function attemptTab(p, tabIndex) {
     let attempt = 0;
     while (!resolved) {
+      // Wait for any active rate-limit cooldown
+      if (rl.cooldownUntil > Date.now()) {
+        if (tabIndex === 0) {
+          const remaining = Math.ceil((rl.cooldownUntil - Date.now()) / 1000);
+          console.log(`[browser] Tab ${tabIndex + 1}: Waiting ${remaining}s for rate limit cooldown, resuming at ${formatTime(rl.cooldownUntil)}`);
+        }
+        while (rl.cooldownUntil > Date.now() && !resolved) {
+          await wait(1000);
+        }
+      }
+
       attempt++;
       try {
         const response = await p.goto(url, {
@@ -143,6 +161,19 @@ async function raceLoadPage(browser, url, numTabs = 10, options = {}) {
         }
 
         if (resolved) return null;
+
+        if (status === 429) {
+          // Only one tab sets the cooldown
+          if (rl.cooldownUntil <= Date.now()) {
+            const retryAfter = response.headers()['retry-after'];
+            const cooldownSec = retryAfter ? parseInt(retryAfter, 10) || 60 : 60;
+            const resumeAt = Date.now() + cooldownSec * 1000;
+            console.log(`[browser] Rate limited (429). All tabs pausing for ${cooldownSec}s, resuming at ${formatTime(resumeAt)} (Retry-After: ${retryAfter || 'none, defaulting 60s'})`);
+            rl.cooldownUntil = resumeAt;
+          }
+          continue;
+        }
+
         if (logAttempts) {
           console.log(`[browser] Tab ${tabIndex + 1}/${safeTabs}: HTTP ${status} (attempt ${attempt}), retrying...`);
         }
@@ -153,7 +184,7 @@ async function raceLoadPage(browser, url, numTabs = 10, options = {}) {
         }
       }
 
-      // Stagger retries: 1-3s random delay per tab to avoid hammering
+      // Stagger retries with jitter
       const minDelay = Math.max(0, retryDelayMinMs);
       const maxDelay = Math.max(minDelay, retryDelayMaxMs);
       await wait(minDelay + Math.random() * (maxDelay - minDelay));
@@ -195,9 +226,23 @@ async function openUrlInMultipleTabs(browser, url, numTabs = 10, options = {}) {
     pages.push(await browser.newPage());
   }
 
+  // Shared rate-limit state across all tabs
+  const rl = { cooldownUntil: 0 };
+
   const results = await Promise.all(pages.map(async (p, idx) => {
     let attempt = 0;
     while (true) {
+      // Wait for any active rate-limit cooldown
+      if (rl.cooldownUntil > Date.now()) {
+        if (idx === 0) {
+          const remaining = Math.ceil((rl.cooldownUntil - Date.now()) / 1000);
+          console.log(`[browser] Cart tab ${idx + 1}: Waiting ${remaining}s for rate limit cooldown...`);
+        }
+        while (rl.cooldownUntil > Date.now()) {
+          await wait(1000);
+        }
+      }
+
       attempt++;
       try {
         const response = await p.goto(url, { waitUntil, timeout });
@@ -207,6 +252,16 @@ async function openUrlInMultipleTabs(browser, url, numTabs = 10, options = {}) {
             console.log(`[browser] Cart tab ${idx + 1}/${safeTabs}: HTTP ${status} (loaded on attempt ${attempt})`);
           }
           return { page: p, tabIndex: idx, status, ok: true, attempts: attempt };
+        }
+
+        if (status === 429) {
+          if (rl.cooldownUntil <= Date.now()) {
+            const retryAfter = response.headers()['retry-after'];
+            const cooldownSec = retryAfter ? parseInt(retryAfter, 10) || 60 : 60;
+            console.log(`[browser] Rate limited (429). All tabs pausing for ${cooldownSec}s (Retry-After: ${retryAfter || 'none, defaulting 60s'})...`);
+            rl.cooldownUntil = Date.now() + cooldownSec * 1000;
+          }
+          continue;
         }
 
         if (logEachTab) {

@@ -368,7 +368,7 @@ async function waitForManualAction(page, timeout) {
 // Parallel checkout: N tabs each load /id/checkout and process independently
 // ---------------------------------------------------------------------------
 
-async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal) {
+async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal, rateLimit) {
   const tag = `[tab ${tabIndex + 1}/${totalTabs}]`;
   const page = await browser.newPage();
   const checkoutUrl = config.BASE_URL + '/id/checkout';
@@ -379,6 +379,11 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
     if (abortSignal.aborted) {
       await page.close().catch(() => {});
       return { tabIndex, success: false, reason: 'aborted', rounds: completedRounds };
+    }
+
+    // Wait for any active rate-limit cooldown
+    while (rateLimit.cooldownUntil > Date.now() && !abortSignal.aborted) {
+      await wait(1000);
     }
 
     attempt++;
@@ -393,6 +398,15 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
       });
 
       const status = response ? response.status() : 0;
+      if (status === 429) {
+        if (rateLimit.cooldownUntil <= Date.now()) {
+          const retryAfter = response.headers()['retry-after'];
+          const cooldownSec = retryAfter ? parseInt(retryAfter, 10) || 60 : 60;
+          console.log(`  ${attemptTag}: Rate limited (429). All tabs pausing for ${cooldownSec}s (Retry-After: ${retryAfter || 'none, defaulting 60s'})...`);
+          rateLimit.cooldownUntil = Date.now() + cooldownSec * 1000;
+        }
+        continue;
+      }
       if (status < 200 || status >= 300) {
         console.log(`  ${attemptTag}: HTTP ${status}, retrying...`);
         continue;
@@ -540,9 +554,10 @@ async function runParallelCheckout(browser, numTabs, rounds = 1) {
   console.log(`  All tabs retry indefinitely on failure.\n`);
 
   const abortSignal = { aborted: false };
+  const rateLimit = { cooldownUntil: 0, consecutive429: 0 };
   const promises = [];
   for (let i = 0; i < numTabs; i++) {
-    promises.push(tabCheckoutLoop(browser, i, numTabs, rounds, abortSignal));
+    promises.push(tabCheckoutLoop(browser, i, numTabs, rounds, abortSignal, rateLimit));
   }
   return Promise.all(promises);
 }
