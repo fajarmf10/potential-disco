@@ -166,9 +166,16 @@ async function main() {
   console.log(chalk.yellow('\n  Logam Mulia - Gold Purchase Automation'));
   console.log(chalk.yellow('  ' + '='.repeat(40) + '\n'));
 
+  const browserType = config.browserType;
+  const isFirefox = browserType === 'firefox';
+
   if (useBrowser) {
-    console.log(chalk.gray('  Mode: Connect to existing browser'));
-    console.log(chalk.gray(`  Make sure Chrome/Edge is running with: chrome.exe --remote-debugging-port=${debugPort}\n`));
+    const browserName = isFirefox ? 'Firefox' : 'Chrome/Edge';
+    const launchCmd = isFirefox
+      ? `firefox.exe --remote-debugging-port=${debugPort}`
+      : `chrome.exe --remote-debugging-port=${debugPort} --user-data-dir="C:\\tmp\\chrome-profile"`;
+    console.log(chalk.gray(`  Mode: Connect to existing ${browserName}`));
+    console.log(chalk.gray(`  Make sure ${browserName} is running with: ${launchCmd}\n`));
   }
 
   // Validate credentials only if not using manual login
@@ -185,8 +192,9 @@ async function main() {
   console.log(chalk.green(`\n  Selected: ${storeName} (${storeCode})`));
 
   // Step 2: Launch or connect to browser
-  console.log(chalk.cyan('\n  [1/5] ' + (useBrowser ? 'Connecting to browser...' : 'Launching browser...')));
-  const browser = await launchBrowser({ useExisting: useBrowser, debugPort });
+  const browserLabel = isFirefox ? 'Firefox' : 'browser';
+  console.log(chalk.cyan('\n  [1/5] ' + (useBrowser ? `Connecting to ${browserLabel}...` : 'Launching browser...')));
+  const browser = await launchBrowser({ useExisting: useBrowser, debugPort, browserType });
 
   let page;
   if (useBrowser) {
@@ -523,17 +531,21 @@ async function main() {
     } // while(true) — Ctrl+C to stop
   } catch (err) {
     if (err.message === 'RATE_LIMITED_RESTART') {
+      const currentBrowserName = isFirefox ? 'Firefox' : 'Chrome';
       console.log(chalk.yellow('\n  Cloudflare ban is server-side - clearing cookies alone may not help.'));
-      console.log(chalk.yellow('  The ban is tied to this Chrome instance\'s TLS fingerprint.'));
+      console.log(chalk.yellow(`  The ban is tied to this ${currentBrowserName} instance's TLS fingerprint.`));
       console.log(chalk.yellow('  Options:'));
       console.log(chalk.yellow('    1) Clear site data and retry (works if ban has expired)'));
-      console.log(chalk.yellow('    2) Exit so you can restart Chrome with a fresh session'));
+      console.log(chalk.yellow(`    2) Exit so you can restart ${currentBrowserName} with a fresh session`));
+      if (!isFirefox) {
+        console.log(chalk.yellow('    Tip: Set LM_BROWSER=firefox in .env to use Firefox (different TLS fingerprint)'));
+      }
       console.log('');
 
       const answer = await ask('  Choose (1 = clear and retry, 2 = exit): ');
 
       if (answer === '2') {
-        console.log(chalk.gray('\n  Exiting. Restart Chrome and re-run the script.\n'));
+        console.log(chalk.gray(`\n  Exiting. Restart ${currentBrowserName} and re-run the script.\n`));
         break; // Exit session loop, cleanup below
       }
 

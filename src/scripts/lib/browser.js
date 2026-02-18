@@ -1,4 +1,5 @@
 const puppeteer = require('puppeteer-extra');
+const puppeteerCore = require('puppeteer-core');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const config = require('../config');
 
@@ -17,53 +18,28 @@ function formatTime(ts) {
 }
 
 async function launchBrowser(options = {}) {
-  const { useExisting = false, debugPort = null } = options;
+  const { useExisting = false, debugPort = null, browserType = config.browserType } = options;
+  const isFirefox = browserType === 'firefox';
 
   if (useExisting) {
-    // Try to connect to an existing Chrome/Edge instance
-    let port = debugPort || parseInt(process.env.LM_DEBUG_PORT || '9222', 10);
+    const port = debugPort || parseInt(process.env.LM_DEBUG_PORT || '9222', 10);
+    const browserName = isFirefox ? 'Firefox' : 'Chrome/Edge';
 
-    console.log(`[browser] Connecting to existing browser at localhost:${port}...`);
+    console.log(`[browser] Connecting to existing ${browserName} at localhost:${port}...`);
 
-    // Try the specified port
-    try {
-      const browser = await puppeteer.connect({
-        browserURL: `http://localhost:${port}`,
-        defaultViewport: null,
-      });
-      console.log(`[browser] Connected to browser on port ${port}`);
-      return browser;
-    } catch (err) {
-      // If default port fails, try common alternatives
-      const alternatePorts = [9222, 9223, 9224, 9225];
-      for (const altPort of alternatePorts) {
-        if (altPort === port) continue; // Skip the one we already tried
-
-        try {
-          console.log(`[browser] Port ${port} unavailable, trying ${altPort}...`);
-          const browser = await puppeteer.connect({
-            browserURL: `http://localhost:${altPort}`,
-            defaultViewport: null,
-          });
-          console.log(`[browser] Connected to browser on port ${altPort}`);
-          return browser;
-        } catch (e) {
-          // Continue to next port
-        }
-      }
-
-      throw new Error(
-        `Could not connect to any browser on ports 9222-9225.\n\n` +
-        `Make sure Chrome/Edge is running with:\n` +
-        `  chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\\tmp\\chrome-profile"\n\n` +
-        `Or set the port via environment variable:\n` +
-        `  set LM_DEBUG_PORT=9222\n\n` +
-        `Error: ${err.message}`
-      );
+    if (isFirefox) {
+      return connectToFirefox(port);
     }
+
+    return connectToChrome(port);
   }
 
-  // Launch a new browser instance
+  if (isFirefox) {
+    console.log('[browser] Firefox is only supported with --use-browser (connect to existing instance).');
+    console.log('[browser] Falling back to Chrome for new browser launch.');
+  }
+
+  // Launch a new Chrome instance (stealth plugin is Chrome-only)
   const browser = await puppeteer.launch({
     headless: config.headless,
     args: [
@@ -75,6 +51,80 @@ async function launchBrowser(options = {}) {
     defaultViewport: { width: 1366, height: 768 },
   });
   return browser;
+}
+
+async function connectToChrome(port) {
+  // Try the specified port
+  try {
+    const browser = await puppeteer.connect({
+      browserURL: `http://localhost:${port}`,
+      defaultViewport: null,
+    });
+    console.log(`[browser] Connected to Chrome on port ${port}`);
+    return browser;
+  } catch (err) {
+    // If default port fails, try common alternatives
+    const alternatePorts = [9222, 9223, 9224, 9225];
+    for (const altPort of alternatePorts) {
+      if (altPort === port) continue;
+
+      try {
+        console.log(`[browser] Port ${port} unavailable, trying ${altPort}...`);
+        const browser = await puppeteer.connect({
+          browserURL: `http://localhost:${altPort}`,
+          defaultViewport: null,
+        });
+        console.log(`[browser] Connected to Chrome on port ${altPort}`);
+        return browser;
+      } catch (e) {
+        // Continue to next port
+      }
+    }
+
+    throw new Error(
+      `Could not connect to Chrome on ports 9222-9225.\n\n` +
+      `Make sure Chrome/Edge is running with:\n` +
+      `  chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\\tmp\\chrome-profile"\n\n` +
+      `Or set the port via environment variable:\n` +
+      `  set LM_DEBUG_PORT=9222\n\n` +
+      `Error: ${err.message}`
+    );
+  }
+}
+
+async function connectToFirefox(port) {
+  // Firefox: use puppeteer-core directly (no stealth plugin needed for existing browser).
+  // Try browserURL first (Firefox exposes /json/version on recent versions),
+  // then fall back to direct WebSocket endpoint.
+  try {
+    const browser = await puppeteerCore.connect({
+      browserURL: `http://localhost:${port}`,
+      defaultViewport: null,
+    });
+    console.log(`[browser] Connected to Firefox on port ${port}`);
+    return browser;
+  } catch (firstErr) {
+    // Fallback: try direct WebSocket connection
+    try {
+      console.log(`[browser] HTTP endpoint failed, trying WebSocket...`);
+      const browser = await puppeteerCore.connect({
+        browserWSEndpoint: `ws://localhost:${port}`,
+        defaultViewport: null,
+      });
+      console.log(`[browser] Connected to Firefox on port ${port} (WebSocket)`);
+      return browser;
+    } catch (wsErr) {
+      throw new Error(
+        `Could not connect to Firefox on port ${port}.\n\n` +
+        `Make sure Firefox is running with:\n` +
+        `  firefox.exe --remote-debugging-port=${port}\n\n` +
+        `Or set the port via environment variable:\n` +
+        `  set LM_DEBUG_PORT=${port}\n\n` +
+        `HTTP error: ${firstErr.message}\n` +
+        `WebSocket error: ${wsErr.message}`
+      );
+    }
+  }
 }
 
 async function waitForCloudflare(page) {
@@ -592,19 +642,38 @@ async function clearBrowserState(page) {
   console.log('[browser] Clearing logammulia.com cookies, storage, and cache...');
 
   // Delete only logammulia.com cookies (not all browser cookies)
-  const cookies = await page.cookies('https://logammulia.com', 'https://www.logammulia.com');
-  if (cookies.length > 0) {
-    await page.deleteCookie(...cookies);
-    console.log(`[browser] Deleted ${cookies.length} logammulia.com cookies`);
+  try {
+    const cookies = await page.cookies('https://logammulia.com', 'https://www.logammulia.com');
+    if (cookies.length > 0) {
+      await page.deleteCookie(...cookies);
+      console.log(`[browser] Deleted ${cookies.length} logammulia.com cookies`);
+    }
+  } catch (e) {
+    // Fallback: clear cookies via document.cookie (works on any browser)
+    console.log('[browser] page.cookies() not available, clearing via document.cookie');
+    await page.evaluate(() => {
+      document.cookie.split(';').forEach(c => {
+        const name = c.split('=')[0].trim();
+        if (!name) return;
+        const paths = ['/', '/id', '/id/purchase'];
+        const domains = ['', 'logammulia.com', '.logammulia.com', 'www.logammulia.com'];
+        for (const p of paths) {
+          for (const d of domains) {
+            const domainPart = d ? `;domain=${d}` : '';
+            document.cookie = `${name}=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=${p}${domainPart}`;
+          }
+        }
+      });
+    });
   }
 
-  // Clear site cache via CDP
+  // Clear site cache via CDP (Chrome only - will silently fail on Firefox)
   try {
     const client = await page.target().createCDPSession();
     await client.send('Network.clearBrowserCache');
     await client.detach();
   } catch (e) {
-    // Non-fatal - cache clearing is best-effort
+    // Non-fatal - CDP not available on Firefox
   }
 
   // Clear localStorage and sessionStorage (already origin-scoped to current page)

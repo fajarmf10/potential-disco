@@ -41,9 +41,16 @@ async function main() {
   console.log(chalk.yellow('\n  Logam Mulia - Cart Checkout (standalone)'));
   console.log(chalk.yellow('  ' + '='.repeat(40) + '\n'));
 
+  const browserType = config.browserType;
+  const isFirefox = browserType === 'firefox';
+
   if (useBrowser) {
-    console.log(chalk.gray('  Mode: Connect to existing browser'));
-    console.log(chalk.gray(`  Ensure Chrome is running with: --remote-debugging-port=${debugPort}\n`));
+    const browserName = isFirefox ? 'Firefox' : 'Chrome/Edge';
+    const launchCmd = isFirefox
+      ? `firefox.exe --remote-debugging-port=${debugPort}`
+      : `chrome.exe --remote-debugging-port=${debugPort} --user-data-dir="C:\\tmp\\chrome-profile"`;
+    console.log(chalk.gray(`  Mode: Connect to existing ${browserName}`));
+    console.log(chalk.gray(`  Ensure ${browserName} is running with: ${launchCmd}\n`));
   }
 
   if (!useBrowser && (!config.credentials.email || !config.credentials.password)) {
@@ -52,8 +59,9 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(chalk.cyan('  [1/3] ' + (useBrowser ? 'Connecting to browser...' : 'Launching browser...')));
-  const browser = await launchBrowser({ useExisting: useBrowser, debugPort });
+  const browserLabel = isFirefox ? 'Firefox' : 'browser';
+  console.log(chalk.cyan('  [1/3] ' + (useBrowser ? `Connecting to ${browserLabel}...` : 'Launching browser...')));
+  const browser = await launchBrowser({ useExisting: useBrowser, debugPort, browserType });
 
   let page;
   if (useBrowser) {

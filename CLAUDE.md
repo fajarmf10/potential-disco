@@ -44,7 +44,9 @@ No test framework or linter is configured.
 
 ### Key Patterns
 
-**Two authentication modes:** Auto-login (credentials in `.env`) or `--use-browser` (connect to existing Chrome on port 9222 via remote debugging).
+**Two authentication modes:** Auto-login (credentials in `.env`) or `--use-browser` (connect to existing Chrome/Firefox on port 9222 via remote debugging).
+
+**Firefox support:** Set `LM_BROWSER=firefox` in `.env` to connect to Firefox instead of Chrome in `--use-browser` mode. Firefox has a different TLS fingerprint from Chrome, which helps when Cloudflare bans the Chrome fingerprint. Firefox connections use `puppeteer-core` directly (no stealth plugin needed). New browser launches always use Chrome with stealth plugin.
 
 **Cookie sync between Puppeteer and Axios:** Puppeteer manages the browser session. Cookies are extracted from the page, imported into Axios's cookie jar for API calls, then synced back before the next browser step. CSRF tokens are re-extracted after every navigation.
 
@@ -72,6 +74,7 @@ Copy `.env.example` to `.env`. Key variables:
 | `LM_TUJUAN_TRANSAKSI` | `Investasi` | Transaction purpose popup |
 | `LM_PAYMENT_METHOD` | — | Auto-select payment (empty = manual) |
 | `LM_STORE_CODES` | `ASB1,ASB2` | Store codes to use |
+| `LM_BROWSER` | `chrome` | Browser type for --use-browser (chrome/firefox) |
 
 ### Python Scripts (`scripts/`)
 
