@@ -53,43 +53,43 @@ async function launchBrowser(options = {}) {
   return browser;
 }
 
+const axios = require('axios');
+
+// Fetch Chrome's WebSocket URL from /json/version endpoint
+async function fetchWsUrl(port) {
+  const res = await axios.get(`http://localhost:${port}/json/version`, { timeout: 5_000 });
+  return res.data?.webSocketDebuggerUrl || null;
+}
+
 async function connectToChrome(port) {
-  // Try the specified port
-  try {
-    const browser = await puppeteer.connect({
-      browserURL: `http://localhost:${port}`,
-      defaultViewport: null,
-    });
-    console.log(`[browser] Connected to Chrome on port ${port}`);
-    return browser;
-  } catch (err) {
-    // If default port fails, try common alternatives
-    const alternatePorts = [9222, 9223, 9224, 9225];
-    for (const altPort of alternatePorts) {
-      if (altPort === port) continue;
+  const portsToTry = [port, 9222, 9223, 9224, 9225].filter((p, i, arr) => arr.indexOf(p) === i);
 
-      try {
-        console.log(`[browser] Port ${port} unavailable, trying ${altPort}...`);
-        const browser = await puppeteer.connect({
-          browserURL: `http://localhost:${altPort}`,
-          defaultViewport: null,
-        });
-        console.log(`[browser] Connected to Chrome on port ${altPort}`);
-        return browser;
-      } catch (e) {
-        // Continue to next port
-      }
+  for (const p of portsToTry) {
+    if (p !== port) {
+      console.log(`[browser] Port ${port} unavailable, trying ${p}...`);
     }
-
-    throw new Error(
-      `Could not connect to Chrome on ports 9222-9225.\n\n` +
-      `Make sure Chrome/Edge is running with:\n` +
-      `  chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\\tmp\\chrome-profile"\n\n` +
-      `Or set the port via environment variable:\n` +
-      `  set LM_DEBUG_PORT=9222\n\n` +
-      `Error: ${err.message}`
-    );
+    try {
+      const wsUrl = await fetchWsUrl(p);
+      if (!wsUrl) continue;
+      console.log(`[browser] Found Chrome on port ${p}, connecting via WebSocket...`);
+      const browser = await puppeteer.connect({
+        browserWSEndpoint: wsUrl,
+        defaultViewport: null,
+      });
+      console.log(`[browser] Connected to Chrome on port ${p}`);
+      return browser;
+    } catch (e) {
+      // Continue to next port
+    }
   }
+
+  throw new Error(
+    `Could not connect to Chrome on ports ${portsToTry.join(', ')}.\n\n` +
+    `Make sure Chrome/Edge is running with:\n` +
+    `  chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\\tmp\\chrome-profile"\n\n` +
+    `Or set the port via environment variable:\n` +
+    `  set LM_DEBUG_PORT=9222\n`
+  );
 }
 
 async function connectToFirefox(port) {

@@ -8,7 +8,8 @@
     "prices": "node index.js --prices-only",
     "cart": "node index.js --cart-only",
     "switch": "node switch-store.js",
-    "stores": "node switch-store.js --list"
+    "stores": "node switch-store.js --list",
+    "monitor": "node stock-monitor.js"
   },
   "dependencies": {
     "axios": "^1.7.0",

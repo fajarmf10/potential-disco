@@ -43,6 +43,11 @@ module.exports = {
   raceTabs: parseInt(process.env.LM_RACE_TABS || '10', 10),
   browserType: (process.env.LM_BROWSER || 'chrome').toLowerCase(),
 
+  telegram: {
+    botToken: process.env.LM_TELEGRAM_BOT_TOKEN || '',
+    chatId: process.env.LM_TELEGRAM_CHAT_ID || '',
+  },
+
   cartItems: parseCartItems(process.env.LM_CART_ITEMS),
 
   endpoints: {
