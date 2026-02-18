@@ -201,11 +201,12 @@ async function main() {
     page = await browser.newPage();
   }
 
-  // Rate limit callback - asks user if they want to restart with fresh login
+  // Rate limit callback - asks user if they want to restart or wait
   const onRateLimit = async (cooldownSec, resumeTime) => {
-    console.log(chalk.yellow(`\n  Rate limited by Cloudflare. Resuming at ${resumeTime}.`));
-    const answer = await ask(`  Restart with fresh login? (y = restart, n = wait and retry): `);
-    return answer.toLowerCase() === 'y' ? 'restart' : 'wait';
+    console.log(chalk.yellow(`\n  Rate limited by Cloudflare (429). Auto-resuming at ${resumeTime} (${cooldownSec}s).`));
+    console.log(chalk.gray('  Waiting will auto-retry. Restarting clears site data and re-logins.'));
+    const answer = await ask(`  Wait and retry, or restart? (w = wait, r = restart): `);
+    return answer.toLowerCase() === 'r' ? 'restart' : 'wait';
   };
 
   // Session loop: allows restarting from login on rate-limit restart
@@ -522,9 +523,23 @@ async function main() {
     } // while(true) — Ctrl+C to stop
   } catch (err) {
     if (err.message === 'RATE_LIMITED_RESTART') {
-      console.log(chalk.yellow('\n  Clearing logammulia.com site data and restarting session...'));
+      console.log(chalk.yellow('\n  Cloudflare ban is server-side - clearing cookies alone may not help.'));
+      console.log(chalk.yellow('  The ban is tied to this Chrome instance\'s TLS fingerprint.'));
+      console.log(chalk.yellow('  Options:'));
+      console.log(chalk.yellow('    1) Clear site data and retry (works if ban has expired)'));
+      console.log(chalk.yellow('    2) Exit so you can restart Chrome with a fresh session'));
+      console.log('');
 
-      // Close all extra tabs, keep one for clearing state
+      const answer = await ask('  Choose (1 = clear and retry, 2 = exit): ');
+
+      if (answer === '2') {
+        console.log(chalk.gray('\n  Exiting. Restart Chrome and re-run the script.\n'));
+        break; // Exit session loop, cleanup below
+      }
+
+      // Option 1: clear and retry
+      console.log(chalk.cyan('  Clearing logammulia.com site data...'));
+
       const allPages = await browser.pages();
       let cleanupPage = allPages.find(p => !p.isClosed());
       if (!cleanupPage) cleanupPage = await browser.newPage();
@@ -532,13 +547,12 @@ async function main() {
         if (p !== cleanupPage && !p.isClosed()) await p.close().catch(() => {});
       }
 
-      // Clear cookies, storage, cache for logammulia.com only
       await clearBrowserState(cleanupPage);
       page = cleanupPage;
 
-      console.log(chalk.green('  Site data cleared. Please re-login in the browser.\n'));
+      console.log(chalk.green('  Site data cleared. Retrying login...\n'));
       sessionRestart = true;
-      continue; // Loop back to login
+      continue;
     }
 
     console.error(chalk.red('\n  Error: ' + err.message));
