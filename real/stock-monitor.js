@@ -502,11 +502,25 @@ async function main() {
     }
 
     // Summary + per-store Telegram
+    const testMode = config.telegram.testMode;
     const storesWithStock = allResults.filter(
       (r) => r.variants.some((v) => v.inStock)
     );
 
-    if (storesWithStock.length > 0) {
+    if (testMode) {
+      // Test mode: send message for every store
+      console.log(chalk.cyan(`  [Test Mode] Sending alerts for all ${allResults.length} store(s)...`));
+      for (const r of allResults) {
+        const msg = buildStoreTelegramMessage(r.store, r.variants, cycle);
+        console.log(
+          chalk.gray(
+            `  [${ts()}] [telegram] Sending ${r.store.name} (${r.variants.filter((v) => v.inStock).length} in stock)...`
+          )
+        );
+        await sendTelegram(msg);
+      }
+    } else if (storesWithStock.length > 0) {
+      // Normal mode: only send when stock found
       const totalInStock = storesWithStock.reduce(
         (sum, r) => sum + r.variants.filter((v) => v.inStock).length,
         0
