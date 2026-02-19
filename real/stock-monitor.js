@@ -108,6 +108,7 @@ function buildStoreTelegramMessage(store, variants, cycle) {
   const inStock = variants.filter((v) => v.inStock);
   const lines = [];
 
+  lines.push(`🔔 @channel`);
   lines.push(`💎 <b>${pick(JIHYO_STOCK_GREETINGS)}</b>`);
 
   lines.push(
