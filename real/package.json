@@ -1,0 +1,17 @@
+{
+  "name": "antamulladi-real",
+  "version": "1.0.0",
+  "description": "Logam Mulia stock monitor",
+  "scripts": {
+    "monitor": "node stock-monitor.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "chalk": "^4.1.2",
+    "dotenv": "^16.4.0",
+    "puppeteer": "^23.0.0",
+    "puppeteer-core": "^23.0.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
