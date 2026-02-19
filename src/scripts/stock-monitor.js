@@ -184,7 +184,8 @@ async function parseStock(page) {
   return variants;
 }
 
-// Switch store location via axios POST (no page navigation).
+// Switch store location via browser fetch (no page navigation).
+// Uses page.evaluate(fetch()) to stay within the browser's Cloudflare session.
 // Returns: true if a switch request was made, false if already at the right store.
 async function switchStore(page, storeCode, csrfToken) {
   const currentStore = await extractCurrentStore(page);
@@ -196,35 +197,34 @@ async function switchStore(page, storeCode, csrfToken) {
     )
   );
 
-  // Extract cookies from the browser for axios
-  const cookies = await page.cookies();
-  const cookieStr = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-
-  try {
-    const res = await axios.post(
-      config.BASE_URL + "/do-change-location",
-      `_token=${encodeURIComponent(csrfToken)}&location=${encodeURIComponent(storeCode)}`,
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "X-CSRF-TOKEN": csrfToken,
-          Cookie: cookieStr,
-        },
-        maxRedirects: 5,
-        validateStatus: () => true,
-        timeout: 30_000,
+  const result = await page.evaluate(
+    async (baseUrl, code, token) => {
+      try {
+        const res = await fetch(baseUrl + "/do-change-location", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-CSRF-TOKEN": token,
+          },
+          body: `_token=${encodeURIComponent(token)}&location=${encodeURIComponent(code)}`,
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+        return { ok: res.ok, status: res.status };
+      } catch (err) {
+        return { ok: false, status: 0, error: err.message };
       }
-    );
-    if (res.status < 200 || res.status >= 400) {
-      console.log(
-        chalk.yellow(
-          `  [${ts()}] Store switch returned HTTP ${res.status}`
-        )
-      );
-    }
-  } catch (err) {
+    },
+    config.BASE_URL,
+    storeCode,
+    csrfToken
+  );
+
+  if (!result.ok) {
     console.log(
-      chalk.yellow(`  [${ts()}] Store switch error: ${err.message}`)
+      chalk.yellow(
+        `  [${ts()}] Store switch returned HTTP ${result.status}${result.error ? ": " + result.error : ""}`
+      )
     );
   }
 
