@@ -232,6 +232,15 @@ async function switchStore(page, storeCode, csrfToken) {
   return true; // counts as a request
 }
 
+// Check if the page is showing Cloudflare Always Online cached version
+async function isCloudflareAlwaysOnline(page) {
+  return page.evaluate(() => {
+    return document.body?.innerText?.includes("Always Online") ||
+      document.body?.innerText?.includes("currently offline") ||
+      !!document.querySelector("#cf-always-online");
+  });
+}
+
 // Load or reload the purchase page, return true if HTTP 2xx
 async function loadPurchasePage(page) {
   const response = await page.goto(
@@ -323,6 +332,37 @@ async function main() {
 
     console.log(chalk.cyan(`\n  === Cycle ${cycle} at ${ts()} ===\n`));
 
+    // Check for Cloudflare Always Online (site offline)
+    if (await isCloudflareAlwaysOnline(page)) {
+      console.log(
+        chalk.yellow(
+          `  [${ts()}] Site is offline (Cloudflare Always Online). Skipping cycle, will retry...`
+        )
+      );
+      // Try to reload to see if it comes back
+      await loadPurchasePage(page).catch(() => {});
+      totalRequests++;
+      if (await isCloudflareAlwaysOnline(page)) {
+        console.log(
+          chalk.yellow(
+            `  [${ts()}] Still offline. Waiting for next cycle.`
+          )
+        );
+        const nextAt = new Date(Date.now() + CYCLE_INTERVAL_MS);
+        console.log(
+          chalk.gray(
+            `\n  [${ts()}] ${totalRequests} requests this cycle. Next check at ${nextAt.toLocaleTimeString(
+              "id-ID",
+              { hour: "2-digit", minute: "2-digit", second: "2-digit" }
+            )}...`
+          )
+        );
+        await wait(CYCLE_INTERVAL_MS);
+        continue;
+      }
+      console.log(chalk.green(`  [${ts()}] Site is back online!`));
+    }
+
     const allResults = [];
 
     // Reorder stores: start from current store to avoid unnecessary switch
@@ -338,7 +378,10 @@ async function main() {
       );
     }
 
+    let siteOffline = false;
+
     for (const store of orderedStores) {
+      if (siteOffline) break;
       let success = false;
 
       for (let attempt = 1; attempt <= MAX_TRIES_PER_STORE; attempt++) {
@@ -382,6 +425,17 @@ async function main() {
           }
 
           await waitForCloudflare(page);
+
+          // Check if we got a Cloudflare Always Online cached page
+          if (await isCloudflareAlwaysOnline(page)) {
+            console.log(
+              chalk.yellow(
+                `  [${ts()}] ${store.name}: Site went offline (Cloudflare Always Online), aborting cycle`
+              )
+            );
+            siteOffline = true;
+            break;
+          }
 
           // Verify we're on the purchase page
           const url = page.url();
