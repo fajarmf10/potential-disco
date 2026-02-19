@@ -325,7 +325,20 @@ async function main() {
 
     const allResults = [];
 
-    for (const store of STORES) {
+    // Reorder stores: start from current store to avoid unnecessary switch
+    const currentStore = await extractCurrentStore(page);
+    let orderedStores = STORES;
+    const currentIdx = STORES.findIndex((s) => s.code === currentStore);
+    if (currentIdx > 0) {
+      orderedStores = [...STORES.slice(currentIdx), ...STORES.slice(0, currentIdx)];
+      console.log(
+        chalk.gray(
+          `  [${ts()}] Already at ${currentStore}, reordered: ${orderedStores.map((s) => s.code).join(" -> ")}`
+        )
+      );
+    }
+
+    for (const store of orderedStores) {
       let success = false;
 
       for (let attempt = 1; attempt <= MAX_TRIES_PER_STORE; attempt++) {
