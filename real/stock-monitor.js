@@ -84,11 +84,11 @@ const JIHYO_STOCK_GREETINGS = [
 ];
 
 const JIHYO_STOCK_FOUND = [
-  "Omo omo omo! There's stock available!! Go go go! 🏃‍♀️💨",
-  "YAAAH! Stock is in!! Quick, grab it before it's gone~! ✨",
-  "I found something~! Don't miss this, okay?! Fighting! 💪",
-  "Daebak!! The gold is here! Move fast, I believe in you~! 🌟",
-  "ONCE, listen!! Stock just appeared!! Palli palli~! 🚨",
+  "Omo omo omo! There's stock available!! Grab it fast~! Go go go! 🏃‍♀️💨",
+  "YAAAH! Stock is in!! Grab it fast before it's gone~! ✨",
+  "I found something~! Grab it fast, don't miss this, okay?! Fighting! 💪",
+  "Daebak!! The gold is here! Grab it fast, move quick, I believe in you~! 🌟",
+  "ONCE, listen!! Stock just appeared!! Grab it fast~! Palli palli~! 🚨",
 ];
 
 function pick(arr) {
@@ -105,12 +105,10 @@ function shuffle(arr) {
 }
 
 function buildStoreTelegramMessage(store, variants, cycle) {
-  const now = ts();
   const inStock = variants.filter((v) => v.inStock);
   const lines = [];
 
   lines.push(`💎 <b>${pick(JIHYO_STOCK_GREETINGS)}</b>`);
-  lines.push(`<i>Cycle ${cycle} - ${now}</i>\n`);
 
   lines.push(
     `🟢 <b>${store.name}</b> (${store.code}) - ${inStock.length}/${variants.length} in stock`
