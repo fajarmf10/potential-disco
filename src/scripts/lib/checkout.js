@@ -372,7 +372,7 @@ async function waitForManualAction(page, timeout) {
 // Parallel checkout: N tabs each load /id/checkout and process independently
 // ---------------------------------------------------------------------------
 
-async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal, rateLimit) {
+async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal, rateLimit, storeCode) {
   const tag = `[tab ${tabIndex + 1}/${totalTabs}]`;
   const page = await browser.newPage();
   const checkoutUrl = config.BASE_URL + '/id/checkout';
@@ -478,15 +478,96 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
         continue;
       }
 
-      // 3. Select pickup at butik
-      console.log(`  ${attemptTag}: Selecting butik pickup...`);
-      await page.evaluate(() => {
-        const radio = document.querySelector('input[name="pickCourier"].pick-store');
-        if (radio && !radio.checked) radio.click();
-      });
+      // 3. Select shipping method (courier for ABDH, butik pickup for others)
+      if (storeCode === 'ABDH') {
+        // --- Pulogadung expedition flow ---
+        console.log(`  ${attemptTag}: Selecting courier (Pulogadung expedition)...`);
 
-      // Dismiss swal info popup (butik location confirmation)
-      await dismissSwal(page);
+        // a) Ensure a shipping address is selected
+        const addressSelected = await page.evaluate(() => {
+          const radios = document.querySelectorAll('input[name="shippingAddress"]:not(.sa-new):not(#sa-0)');
+          if (radios.length === 0) return false;
+          const anyChecked = [...radios].some(r => r.checked);
+          if (!anyChecked) {
+            radios[0].click();
+          }
+          return true;
+        });
+
+        if (!addressSelected) {
+          console.log(`  ${attemptTag}: No shipping address found, retrying...`);
+          await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}-no-address`);
+          continue;
+        }
+
+        // b) Wait for courier prices to load, retrying indefinitely
+        let courierReady = false;
+        let courierRetry = 0;
+        while (!courierReady) {
+          if (courierRetry > 0) {
+            // Re-trigger shipping cost AJAX by dispatching change on checked address
+            console.log(`  ${attemptTag}: Retrigger shipping cost AJAX (retry ${courierRetry})...`);
+            await page.evaluate(() => {
+              const checked = document.querySelector('input[name="shippingAddress"]:checked');
+              if (checked) {
+                const $ = window.jQuery || window.$;
+                if ($) $(checked).trigger('change');
+              }
+            });
+          }
+          courierRetry++;
+
+          // Poll up to 8s for valid courier prices
+          const pollStart = Date.now();
+          while (Date.now() - pollStart < 8000) {
+            courierReady = await page.evaluate(() => {
+              const paxel = document.getElementById('courrier_price_top_3');
+              const rpx = document.getElementById('courrier_price_top_1');
+              const paxelOk = paxel && paxel.textContent.includes('Rp') && !paxel.textContent.includes('Tidak terjangkau');
+              const rpxOk = rpx && rpx.textContent.includes('Rp') && !rpx.textContent.includes('Tidak terjangkau');
+              return paxelOk || rpxOk;
+            });
+            if (courierReady) break;
+            await wait(500);
+          }
+        }
+
+        // c) Select courier: prefer Paxel, fall back to RPX
+        const courierSelected = await page.evaluate(() => {
+          const paxel = document.getElementById('courrier_price_top_3');
+          const rpx = document.getElementById('courrier_price_top_1');
+          if (paxel && paxel.textContent.includes('Rp') && !paxel.textContent.includes('Tidak terjangkau')) {
+            const radio = document.getElementById('pickCourier-3');
+            if (radio) { radio.click(); return 'Paxel'; }
+          }
+          if (rpx && rpx.textContent.includes('Rp') && !rpx.textContent.includes('Tidak terjangkau')) {
+            const radio = document.getElementById('pickCourier-1');
+            if (radio) { radio.click(); return 'RPX'; }
+          }
+          return null;
+        });
+
+        if (!courierSelected) {
+          console.log(`  ${attemptTag}: Could not select any courier, retrying...`);
+          await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}-courier-fail`);
+          continue;
+        }
+
+        console.log(`  ${attemptTag}: Selected courier: ${courierSelected}`);
+
+        // d) Wait for courier selection to settle (updates order totals)
+        await wait(1000 + Math.random() * 1000);
+      } else {
+        // --- Butik pickup flow ---
+        console.log(`  ${attemptTag}: Selecting butik pickup...`);
+        await page.evaluate(() => {
+          const radio = document.querySelector('input[name="pickCourier"].pick-store');
+          if (radio && !radio.checked) radio.click();
+        });
+
+        // Dismiss swal info popup (butik location confirmation)
+        await dismissSwal(page);
+      }
 
       // 4. Check the "Saya setuju" T&C checkbox
       console.log(`  ${attemptTag}: Checking T&C checkbox...`);
@@ -574,7 +655,8 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
 async function runParallelCheckout(browser, numTabs, rounds = 1, options = {}) {
   const totalCheckouts = numTabs * rounds;
   console.log(`  Opening ${numTabs} tabs for parallel checkout (${rounds} round(s) each = ${totalCheckouts} total)...`);
-  console.log(`  Each tab: /id/checkout → select pickup → agree T&C → Bayar Sekarang`);
+  const flowDesc = options.storeCode === 'ABDH' ? 'select courier' : 'select pickup';
+  console.log(`  Each tab: /id/checkout → ${flowDesc} → agree T&C → Bayar Sekarang`);
   console.log(`  All tabs retry indefinitely on failure.\n`);
 
   const abortSignal = { aborted: false };
@@ -584,9 +666,10 @@ async function runParallelCheckout(browser, numTabs, rounds = 1, options = {}) {
     prompted: false,
     onRateLimit: options.onRateLimit || null,
   };
+  const storeCode = options.storeCode || null;
   const promises = [];
   for (let i = 0; i < numTabs; i++) {
-    promises.push(tabCheckoutLoop(browser, i, numTabs, rounds, abortSignal, rateLimit));
+    promises.push(tabCheckoutLoop(browser, i, numTabs, rounds, abortSignal, rateLimit, storeCode));
   }
   return Promise.all(promises);
 }

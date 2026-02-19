@@ -498,7 +498,7 @@ async function main() {
 
       // N tabs checkout
       console.log(chalk.cyan(`  [cycle ${cycle}] Parallel checkout (${config.raceTabs} tabs x ${rounds} rounds)...`));
-      const results = await runParallelCheckout(browser, config.raceTabs, rounds, { onRateLimit });
+      const results = await runParallelCheckout(browser, config.raceTabs, rounds, { onRateLimit, storeCode });
 
       // Check if user chose to restart due to rate limiting
       const wantsRestart = results.some(r => r.reason === 'rate_limited_restart');

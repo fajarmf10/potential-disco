@@ -92,7 +92,7 @@ async function main() {
     const rounds = 2;
     console.log(chalk.cyan(`  [3/3] Parallel checkout...`));
 
-    const results = await runParallelCheckout(browser, config.raceTabs, rounds);
+    const results = await runParallelCheckout(browser, config.raceTabs, rounds, { storeCode: config.storeCodes[0] });
 
     // Summary
     console.log(chalk.yellow('\n  ' + '='.repeat(40)));
