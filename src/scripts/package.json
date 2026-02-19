@@ -4,7 +4,7 @@
   "description": "Logam Mulia gold purchase automation",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node index.js --use-browser",
     "prices": "node index.js --prices-only",
     "cart": "node index.js --cart-only",
     "switch": "node switch-store.js",
