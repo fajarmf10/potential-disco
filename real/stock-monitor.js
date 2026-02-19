@@ -480,6 +480,20 @@ async function main() {
 
           allResults.push({ store, variants });
           printStockTable(store.code, store.name, variants);
+
+          // Send Telegram immediately for this store (test mode or stock found)
+          const testMode = config.telegram.testMode;
+          const hasStock = variants.some((v) => v.inStock);
+          if (testMode || hasStock) {
+            const msg = buildStoreTelegramMessage(store, variants, cycle);
+            console.log(
+              chalk.gray(
+                `  [${ts()}] [telegram] Sending alert for ${store.name}...`
+              )
+            );
+            await sendTelegram(msg);
+          }
+
           success = true;
           break;
         } catch (err) {
@@ -501,26 +515,12 @@ async function main() {
       }
     }
 
-    // Summary + per-store Telegram
-    const testMode = config.telegram.testMode;
+    // Cycle summary
     const storesWithStock = allResults.filter(
       (r) => r.variants.some((v) => v.inStock)
     );
 
-    if (testMode) {
-      // Test mode: send message for every store
-      console.log(chalk.cyan(`  [Test Mode] Sending alerts for all ${allResults.length} store(s)...`));
-      for (const r of allResults) {
-        const msg = buildStoreTelegramMessage(r.store, r.variants, cycle);
-        console.log(
-          chalk.gray(
-            `  [${ts()}] [telegram] Sending ${r.store.name} (${r.variants.filter((v) => v.inStock).length} in stock)...`
-          )
-        );
-        await sendTelegram(msg);
-      }
-    } else if (storesWithStock.length > 0) {
-      // Normal mode: only send when stock found
+    if (storesWithStock.length > 0) {
       const totalInStock = storesWithStock.reduce(
         (sum, r) => sum + r.variants.filter((v) => v.inStock).length,
         0
@@ -530,18 +530,8 @@ async function main() {
           `  >> ${totalInStock} item(s) in stock across ${storesWithStock.length} store(s)!`
         )
       );
-
-      for (const r of storesWithStock) {
-        const msg = buildStoreTelegramMessage(r.store, r.variants, cycle);
-        console.log(
-          chalk.gray(
-            `  [${ts()}] [telegram] Sending stock alert for ${r.store.name}...`
-          )
-        );
-        await sendTelegram(msg);
-      }
     } else {
-      console.log(chalk.gray(`  >> No stock available at any store (no Telegram sent)`));
+      console.log(chalk.gray(`  >> No stock available at any store`));
     }
 
     // Wait 1 full minute after the last request
