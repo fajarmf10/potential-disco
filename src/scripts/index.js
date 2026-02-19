@@ -85,15 +85,17 @@ function printCartSummary(items, variants) {
 
 async function promptStore() {
   console.log(chalk.bold('\n  Select store:'));
-  console.log('    D - Surabaya Darmo  (ASB1)');
-  console.log('    P - Surabaya Pakuwon (ASB2)');
+  console.log('    D - Surabaya Darmo     (ASB1)');
+  console.log('    P - Surabaya Pakuwon   (ASB2)');
+  console.log('    G - Pulogadung Jakarta (ABDH)');
   console.log('');
 
   while (true) {
-    const answer = (await ask('  Store (D/P): ')).toUpperCase();
+    const answer = (await ask('  Store (D/P/G): ')).toUpperCase();
     if (answer === 'D') return 'ASB1';
     if (answer === 'P') return 'ASB2';
-    console.log(chalk.red('  Invalid choice. Enter D or P.'));
+    if (answer === 'G') return 'ABDH';
+    console.log(chalk.red('  Invalid choice. Enter D, P, or G.'));
   }
 }
 
@@ -297,7 +299,9 @@ async function main() {
       console.log(chalk.red('\n  All items are out of stock at ' + storeName + '.'));
 
       // Offer to switch stores
-      const otherStore = storeCode === 'ASB1' ? 'ASB2' : 'ASB1';
+      const allStores = ['ASB1', 'ASB2', 'ABDH'];
+      const otherStores = allStores.filter(s => s !== storeCode);
+      const otherStore = otherStores[0];
       const otherStoreName = config.getStoreName(otherStore);
 
       const shouldSwitch = await promptConfirm(`Switch to ${otherStoreName} instead?`);
