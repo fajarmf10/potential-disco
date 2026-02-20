@@ -17,6 +17,21 @@ function formatTime(ts) {
   return new Date(ts).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+async function isCloudflareAlwaysOnline(page) {
+  try {
+    return await page.evaluate(() => {
+      const bodyText = document.body?.innerText || '';
+      return (
+        bodyText.includes('Always Online') ||
+        bodyText.includes('currently offline') ||
+        !!document.querySelector('#cf-always-online')
+      );
+    });
+  } catch {
+    return false;
+  }
+}
+
 async function launchBrowser(options = {}) {
   const { useExisting = false, debugPort = null, browserType = config.browserType } = options;
   const isFirefox = browserType === 'firefox';
@@ -443,10 +458,13 @@ async function login(page, options = {}) {
       return title.includes('Attention Required') ||
              body.includes('you have been blocked') ||
              body.includes('enable cookies') ||
-             body.includes('Cloudflare Ray ID');
+             body.includes('Cloudflare Ray ID') ||
+             body.includes('Always Online') ||
+             body.includes('currently offline') ||
+             !!document.querySelector('#cf-always-online');
     });
     if (pageIsBlocked) {
-      console.log('[browser] Page is showing a Cloudflare block/rate-limit page. Reloading...');
+      console.log('[browser] Page is showing a Cloudflare block/cached page. Reloading...');
     }
   }
 
@@ -488,14 +506,42 @@ async function login(page, options = {}) {
   }
 
   if (manualLogin) {
-    console.log('[browser] Manual login mode: please log in via the browser window');
+    const siteOffline = await isCloudflareAlwaysOnline(page);
+    if (siteOffline) {
+      console.log('[browser] Site is offline (Cloudflare Always Online). Waiting for recovery...');
+    } else {
+      console.log('[browser] Manual login mode: please log in via the browser window');
+    }
     console.log('[browser] Waiting for login to complete (checking for user menu)...');
 
-    // Poll for login completion
     const startTime = Date.now();
     const timeout = 300_000; // 5 minutes
+    let wasOffline = siteOffline;
     while (Date.now() - startTime < timeout) {
       await wait(2000);
+
+      // If page shows Cloudflare Always Online, reload to check if site recovered
+      if (await isCloudflareAlwaysOnline(page)) {
+        wasOffline = true;
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        console.log(`[browser] Site still offline (Always Online), reloading... [${elapsed}s elapsed]`);
+        await wait(8000);
+        try {
+          const url = config.BASE_URL + config.endpoints.purchasePage;
+          await page.goto(url, { waitUntil: 'networkidle2', timeout: NAVIGATION_TIMEOUT });
+          await waitForCloudflare(page);
+        } catch (e) {
+          console.log(`[browser] Reload error: ${e.message}`);
+        }
+        continue;
+      }
+
+      // Site just came back from Always Online
+      if (wasOffline) {
+        console.log('[browser] Site is back online! Checking login...');
+        wasOffline = false;
+      }
+
       const nowLoggedIn = await page.evaluate(() => {
         const userText = document.querySelector('.user-toggle .text');
         return userText && userText.textContent.trim().startsWith('Hi,');
@@ -687,6 +733,7 @@ async function clearBrowserState(page) {
 module.exports = {
   launchBrowser,
   waitForCloudflare,
+  isCloudflareAlwaysOnline,
   login,
   raceLoadPage,
   openUrlInMultipleTabs,

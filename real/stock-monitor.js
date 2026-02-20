@@ -8,14 +8,15 @@ const {
   extractCurrentStore,
   extractCsrfToken,
   waitForCloudflare,
+  isCloudflareAlwaysOnline,
 } = require("./lib/browser");
 
 const NAVIGATION_TIMEOUT = 60_000;
-// const STORES = Object.entries(config.storeNames).map(([code, name]) => ({
-//   code,
-//   name,
-// }));
-const STORES = [];
+const STORES = Object.entries(config.storeNames).map(([code, name]) => ({
+  code,
+  name,
+}));
+// const STORES = [];
 const PRIORITY_STORE_CODES = ["ASB1", "ASB2", "ABDH"];
 const MAX_TRIES_PER_STORE = 2;
 const CYCLE_INTERVAL_MS = 60_000; // 1 minute after last request
@@ -251,17 +252,6 @@ async function switchStore(page, storeCode, csrfToken) {
 
   await wait(500);
   return true; // counts as a request
-}
-
-// Check if the page is showing Cloudflare Always Online cached version
-async function isCloudflareAlwaysOnline(page) {
-  return page.evaluate(() => {
-    return (
-      document.body?.innerText?.includes("Always Online") ||
-      document.body?.innerText?.includes("currently offline") ||
-      !!document.querySelector("#cf-always-online")
-    );
-  });
 }
 
 // Load or reload the purchase page, return true if HTTP 2xx
