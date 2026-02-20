@@ -369,6 +369,104 @@ async function waitForManualAction(page, timeout) {
 }
 
 // ---------------------------------------------------------------------------
+// Verify order in order history and extract VA numbers
+// ---------------------------------------------------------------------------
+
+async function verifyOrderHistory(page) {
+  const orderHistoryUrl = config.BASE_URL + '/id/my-account/order-history';
+  console.log('[checkout] Navigating to order history...');
+
+  await page.goto(orderHistoryUrl, {
+    waitUntil: 'networkidle2',
+    timeout: NAVIGATION_TIMEOUT,
+  });
+
+  await saveSnapshot(page, 'order-history');
+
+  const orderInfo = await page.evaluate(() => {
+    const rows = document.querySelectorAll('.ctr');
+    if (rows.length === 0) return null;
+
+    const firstRow = rows[0];
+
+    // Extract order ID from the row text
+    const rowText = firstRow.textContent || '';
+    const orderIdMatch = rowText.match(/#(LMA\d+)/);
+    const orderId = orderIdMatch ? orderIdMatch[1] : null;
+
+    // Extract detail popup URL from the fancybox link
+    const detailLink = firstRow.querySelector('a[data-fancybox][data-type="ajax"]');
+    const detailUrl = detailLink ? detailLink.getAttribute('data-src') || detailLink.getAttribute('href') : null;
+
+    // Extract date from the second .ctd cell
+    const cells = firstRow.querySelectorAll('.ctd');
+    const dateText = cells.length >= 2 ? cells[1].textContent.trim() : '';
+
+    return { orderId, detailUrl, dateText };
+  });
+
+  if (!orderInfo) {
+    console.log('[checkout] No orders found in order history');
+    return null;
+  }
+
+  console.log(`[checkout] Latest order: #${orderInfo.orderId || '?'} - ${orderInfo.dateText}`);
+
+  // Verify it's today's order
+  const today = new Date();
+  const todayStr = today.toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  if (orderInfo.dateText && !orderInfo.dateText.includes(todayStr) && !orderInfo.dateText.includes(today.getDate().toString())) {
+    console.log(`[checkout] Warning: latest order date "${orderInfo.dateText}" may not be today (${todayStr})`);
+  }
+
+  // Fetch detail popup to extract VA numbers
+  if (!orderInfo.detailUrl) {
+    console.log('[checkout] No detail URL found for order');
+    return orderInfo;
+  }
+
+  console.log('[checkout] Fetching order detail...');
+  const detailHtml = await page.evaluate(async (url) => {
+    try {
+      const res = await fetch(url, { credentials: 'same-origin' });
+      return await res.text();
+    } catch (e) {
+      return null;
+    }
+  }, orderInfo.detailUrl);
+
+  if (!detailHtml) {
+    console.log('[checkout] Could not fetch order detail');
+    return orderInfo;
+  }
+
+  // Parse VA numbers from detail HTML
+  // Pattern: "Pembayaran Via Bank (BRI|Mandiri|BCA|Permata):" followed by <strong>VA_NUMBER</strong>
+  const vaNumbers = [];
+  const bankPattern = /Pembayaran\s+Via\s+Bank\s+\(([^)]+)\)\s*:?\s*[\s\S]*?<strong>\s*(\d[\d\s]*\d)\s*<\/strong>/gi;
+  let match;
+  while ((match = bankPattern.exec(detailHtml)) !== null) {
+    vaNumbers.push({ bank: match[1].trim(), va: match[2].trim().replace(/\s+/g, '') });
+  }
+
+  // Print results
+  console.log('\n  ==============================');
+  console.log(`  Order: #${orderInfo.orderId || '?'}`);
+  console.log(`  Date: ${orderInfo.dateText}`);
+  if (vaNumbers.length > 0) {
+    console.log('  VA Numbers:');
+    for (const va of vaNumbers) {
+      console.log(`    ${va.bank}: ${va.va}`);
+    }
+  } else {
+    console.log('  (No VA numbers found in detail)');
+  }
+  console.log('  ==============================\n');
+
+  return { ...orderInfo, vaNumbers };
+}
+
+// ---------------------------------------------------------------------------
 // Parallel checkout: N tabs each load /id/checkout and process independently
 // ---------------------------------------------------------------------------
 
@@ -603,6 +701,18 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
       if (swalError) {
         console.log(`  ${attemptTag}: SweetAlert: "${swalError.title}" - ${swalError.text}`);
         await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}-swal`);
+
+        // Detect stock-out error - abort all tabs so caller can downgrade
+        const swalText = (swalError.title + ' ' + swalError.text).toLowerCase();
+        if (swalText.includes('pemesanan gagal diproses') || swalText.includes('produk yang anda pilih tidak tersedia')) {
+          console.log(`  ${attemptTag}: STOCK OUT detected - aborting all tabs for downgrade`);
+          abortSignal.aborted = true;
+          abortSignal.stockOut = true;
+          await dismissSwal(page);
+          await page.close().catch(() => {});
+          return { tabIndex, success: false, reason: 'stock_out', rounds: completedRounds };
+        }
+
         await dismissSwal(page);
         continue;
       }
@@ -621,21 +731,95 @@ async function tabCheckoutLoop(browser, tabIndex, totalTabs, rounds, abortSignal
 
       await saveSnapshot(page, `result-tab${tabIndex + 1}-attempt${attempt}`);
 
-      // 6. Handle post-checkout (tujuan transaksi, payment, confirmation)
+      // 6. Handle post-checkout
       try {
-        await processCheckoutPage(page);
-        completedRounds++;
-        console.log(`  ${tag}: Round ${completedRounds}/${rounds} completed successfully!`);
-        await saveSnapshot(page, `confirmation-tab${tabIndex + 1}-round${completedRounds}`);
+        if (storeCode && storeCode !== 'ABDH') {
+          // --- Butik flow: no payment selection, check for success directly ---
+          const postUrl = page.url();
+          const postState = await page.evaluate(() => {
+            const body = document.body.textContent || '';
+            const url = window.location.href;
+            return {
+              url,
+              isOrderHistory: url.includes('/order-history'),
+              hasSuccess: body.includes('Pesanan Selesai!') || body.includes('Terima kasih telah memesan') || body.includes('berhasil'),
+              orderIdMatch: body.match(/#(LMA\d+)/),
+            };
+          });
 
-        if (completedRounds >= rounds) {
-          await page.close().catch(() => {});
-          return { tabIndex, success: true, attempts: attempt, rounds: completedRounds };
+          if (postState.isOrderHistory || postState.hasSuccess) {
+            const orderId = postState.orderIdMatch ? postState.orderIdMatch[1] : null;
+            console.log(`  ${attemptTag}: Butik checkout SUCCESS!${orderId ? ' Order: #' + orderId : ''}`);
+            await saveSnapshot(page, `success-tab${tabIndex + 1}-round${completedRounds + 1}`);
+
+            // Verify order and extract VA numbers
+            try {
+              await verifyOrderHistory(page);
+            } catch (verifyErr) {
+              console.log(`  ${attemptTag}: Order history verification failed: ${verifyErr.message}`);
+            }
+
+            completedRounds++;
+            console.log(`  ${tag}: Round ${completedRounds}/${rounds} completed successfully!`);
+
+            if (completedRounds >= rounds) {
+              await page.close().catch(() => {});
+              return { tabIndex, success: true, attempts: attempt, rounds: completedRounds };
+            }
+
+            console.log(`  ${tag}: Starting next round...`);
+            continue;
+          } else {
+            // Not an obvious success - dismiss any popup and re-check
+            console.log(`  ${attemptTag}: Butik post-checkout page: ${postUrl}`);
+            await saveSnapshot(page, `butik-post-tab${tabIndex + 1}-attempt${attempt}`);
+            await dismissSwal(page);
+            await wait(1000);
+
+            const recheck = await page.evaluate(() => {
+              const body = document.body.textContent || '';
+              const url = window.location.href;
+              return {
+                isOrderHistory: url.includes('/order-history'),
+                hasSuccess: body.includes('Pesanan Selesai!') || body.includes('Terima kasih telah memesan') || body.includes('berhasil'),
+              };
+            });
+            if (recheck.isOrderHistory || recheck.hasSuccess) {
+              console.log(`  ${attemptTag}: Butik checkout SUCCESS (after dismiss)!`);
+              try {
+                await verifyOrderHistory(page);
+              } catch (verifyErr) {
+                console.log(`  ${attemptTag}: Order history verification failed: ${verifyErr.message}`);
+              }
+              completedRounds++;
+              console.log(`  ${tag}: Round ${completedRounds}/${rounds} completed successfully!`);
+              if (completedRounds >= rounds) {
+                await page.close().catch(() => {});
+                return { tabIndex, success: true, attempts: attempt, rounds: completedRounds };
+              }
+              console.log(`  ${tag}: Starting next round...`);
+              continue;
+            }
+            // Still not success - retry
+            console.log(`  ${attemptTag}: Butik post-checkout unclear, retrying...`);
+            continue;
+          }
+        } else {
+          // --- ABDH / expedition flow: full processCheckoutPage ---
+          await processCheckoutPage(page);
+          completedRounds++;
+          console.log(`  ${tag}: Round ${completedRounds}/${rounds} completed successfully!`);
+          await saveSnapshot(page, `confirmation-tab${tabIndex + 1}-round${completedRounds}`);
+
+          if (completedRounds >= rounds) {
+            await page.close().catch(() => {});
+            return { tabIndex, success: true, attempts: attempt, rounds: completedRounds };
+          }
+
+          // More rounds to go - loop back to checkout page
+          console.log(`  ${tag}: Starting next round...`);
+          continue;
         }
-
-        // More rounds to go — loop back to checkout page
-        console.log(`  ${tag}: Starting next round...`);
-        continue;
       } catch (err) {
         console.log(`  ${attemptTag}: Post-checkout failed: ${err.message}`);
         await saveSnapshot(page, `error-tab${tabIndex + 1}-attempt${attempt}-post`);
@@ -681,4 +865,5 @@ module.exports = {
   processCheckoutPage,
   tryClickSelector,
   runParallelCheckout,
+  verifyOrderHistory,
 };

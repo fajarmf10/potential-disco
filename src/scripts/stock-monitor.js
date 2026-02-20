@@ -8,6 +8,7 @@ const {
   extractCurrentStore,
   extractCsrfToken,
   waitForCloudflare,
+  isCloudflareAlwaysOnline,
 } = require("./lib/browser");
 
 const NAVIGATION_TIMEOUT = 60_000;
@@ -18,6 +19,7 @@ const STORES = [
 ];
 const MAX_TRIES_PER_STORE = 2;
 const CYCLE_INTERVAL_MS = 60_000; // 1 minute after last request
+const STORE_GAP_MS = 8_000; // 8 seconds between stores
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -43,7 +45,9 @@ const TG_ENABLED = !!(config.telegram.botToken && config.telegram.chatId);
 
 async function sendTelegram(text) {
   if (!TG_ENABLED) {
-    console.log(chalk.gray(`  [${ts()}] [telegram] Disabled (no token/chatId)`));
+    console.log(
+      chalk.gray(`  [${ts()}] [telegram] Disabled (no token/chatId)`)
+    );
     return false;
   }
   const url = `https://api.telegram.org/bot${config.telegram.botToken}/sendMessage`;
@@ -54,11 +58,19 @@ async function sendTelegram(text) {
       parse_mode: "HTML",
       disable_web_page_preview: true,
     });
-    console.log(chalk.green(`  [${ts()}] [telegram] Sent OK (message_id: ${res.data?.result?.message_id})`));
+    console.log(
+      chalk.green(
+        `  [${ts()}] [telegram] Sent OK (message_id: ${
+          res.data?.result?.message_id
+        })`
+      )
+    );
     return true;
   } catch (err) {
     const detail = err.response?.data?.description || err.message;
-    console.log(chalk.yellow(`  [${ts()}] [telegram] Failed to send: ${detail}`));
+    console.log(
+      chalk.yellow(`  [${ts()}] [telegram] Failed to send: ${detail}`)
+    );
     return false;
   }
 }
@@ -72,11 +84,11 @@ const JIHYO_STOCK_GREETINGS = [
 ];
 
 const JIHYO_STOCK_FOUND = [
-  "Omo omo omo! There's stock available!! Go go go! 🏃‍♀️💨",
-  "YAAAH! Stock is in!! Quick, grab it before it's gone~! ✨",
-  "I found something~! Don't miss this, okay?! Fighting! 💪",
-  "Daebak!! The gold is here! Move fast, I believe in you~! 🌟",
-  "ONCE, listen!! Stock just appeared!! Palli palli~! 🚨",
+  "Omo omo omo! There's stock available!! Grab it fast~! Go go go! 🏃‍♀️💨",
+  "YAAAH! Stock is in!! Grab it fast before it's gone~! ✨",
+  "I found something~! Grab it fast, don't miss this, okay?! Fighting! 💪",
+  "Daebak!! The gold is here! Grab it fast, move quick, I believe in you~! 🌟",
+  "ONCE, listen!! Stock just appeared!! Grab it fast~! Palli palli~! 🚨",
 ];
 
 const JIHYO_NO_STOCK = [
@@ -91,29 +103,27 @@ function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function buildTelegramMessage(allResults, cycle) {
-  const now = ts();
-  let hasStock = false;
+function buildStoreTelegramMessage(store, variants, cycle) {
+  const inStock = variants.filter((v) => v.inStock);
+  const hasStock = inStock.length > 0;
   const lines = [];
 
+  if (hasStock) {
+    lines.push(`🔔 @channel`);
+  }
   lines.push(`💎 <b>${pick(JIHYO_STOCK_GREETINGS)}</b>`);
-  lines.push(`<i>Cycle ${cycle} - ${now}</i>\n`);
 
-  for (const r of allResults) {
-    const inStock = r.variants.filter((v) => v.inStock);
-    const icon = inStock.length > 0 ? "🟢" : "🔴";
-    lines.push(
-      `${icon} <b>${r.store.name}</b> (${r.store.code}) - ${inStock.length}/${r.variants.length}`
-    );
+  const icon = hasStock ? "🟢" : "🔴";
+  lines.push(
+    `${icon} <b>${store.name}</b> (${store.code}) - ${inStock.length}/${variants.length} in stock`
+  );
 
-    if (inStock.length > 0) {
-      hasStock = true;
-      for (const v of inStock) {
-        const gram = config.getVariantById(v.id);
-        const gramStr = gram ? gram.gram + "g" : v.name;
-        const qtyStr = v.availableQty != null ? ` x${v.availableQty}` : "";
-        lines.push(`    ✦ <b>${gramStr}</b> - ${formatPrice(v.price)}${qtyStr}`);
-      }
+  if (hasStock) {
+    for (const v of inStock) {
+      const gram = config.getVariantById(v.id);
+      const gramStr = gram ? gram.gram + "g" : v.name;
+      const qtyStr = v.availableQty != null ? ` x${v.availableQty}` : "";
+      lines.push(`    ✦ <b>${gramStr}</b> - ${formatPrice(v.price)}${qtyStr}`);
     }
   }
 
@@ -206,7 +216,9 @@ async function switchStore(page, storeCode, csrfToken) {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-CSRF-TOKEN": token,
           },
-          body: `_token=${encodeURIComponent(token)}&location=${encodeURIComponent(code)}`,
+          body: `_token=${encodeURIComponent(
+            token
+          )}&location=${encodeURIComponent(code)}`,
           credentials: "same-origin",
           redirect: "follow",
         });
@@ -223,22 +235,15 @@ async function switchStore(page, storeCode, csrfToken) {
   if (!result.ok) {
     console.log(
       chalk.yellow(
-        `  [${ts()}] Store switch returned HTTP ${result.status}${result.error ? ": " + result.error : ""}`
+        `  [${ts()}] Store switch returned HTTP ${result.status}${
+          result.error ? ": " + result.error : ""
+        }`
       )
     );
   }
 
   await wait(500);
   return true; // counts as a request
-}
-
-// Check if the page is showing Cloudflare Always Online cached version
-async function isCloudflareAlwaysOnline(page) {
-  return page.evaluate(() => {
-    return document.body?.innerText?.includes("Always Online") ||
-      document.body?.innerText?.includes("currently offline") ||
-      !!document.querySelector("#cf-always-online");
-  });
 }
 
 // Load or reload the purchase page, return true if HTTP 2xx
@@ -303,10 +308,26 @@ async function main() {
       }s between cycles`
     )
   );
+  const testMode = config.telegram.testMode;
   if (TG_ENABLED) {
-    console.log(chalk.gray(`  Telegram: enabled (chat ${config.telegram.chatId})`));
+    console.log(
+      chalk.gray(`  Telegram: enabled (chat ${config.telegram.chatId})`)
+    );
+    console.log(
+      chalk.gray(
+        `  Telegram mode: ${
+          testMode
+            ? "test (send every cycle)"
+            : "stock-only (send when stock found)"
+        }`
+      )
+    );
   } else {
-    console.log(chalk.gray("  Telegram: disabled (set LM_TELEGRAM_BOT_TOKEN and LM_TELEGRAM_CHAT_ID in .env)"));
+    console.log(
+      chalk.gray(
+        "  Telegram: disabled (set LM_TELEGRAM_BOT_TOKEN and LM_TELEGRAM_CHAT_ID in .env)"
+      )
+    );
   }
   console.log(chalk.gray("  Press Ctrl+C to stop\n"));
 
@@ -344,17 +365,16 @@ async function main() {
       totalRequests++;
       if (await isCloudflareAlwaysOnline(page)) {
         console.log(
-          chalk.yellow(
-            `  [${ts()}] Still offline. Waiting for next cycle.`
-          )
+          chalk.yellow(`  [${ts()}] Still offline. Waiting for next cycle.`)
         );
         const nextAt = new Date(Date.now() + CYCLE_INTERVAL_MS);
         console.log(
           chalk.gray(
-            `\n  [${ts()}] ${totalRequests} requests this cycle. Next check at ${nextAt.toLocaleTimeString(
-              "id-ID",
-              { hour: "2-digit", minute: "2-digit", second: "2-digit" }
-            )}...`
+            `\n  [${ts()}] ${totalRequests} requests this cycle. Next check at ${nextAt.toLocaleTimeString("id-ID", {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            })}...`
           )
         );
         await wait(CYCLE_INTERVAL_MS);
@@ -370,10 +390,15 @@ async function main() {
     let orderedStores = STORES;
     const currentIdx = STORES.findIndex((s) => s.code === currentStore);
     if (currentIdx > 0) {
-      orderedStores = [...STORES.slice(currentIdx), ...STORES.slice(0, currentIdx)];
+      orderedStores = [
+        ...STORES.slice(currentIdx),
+        ...STORES.slice(0, currentIdx),
+      ];
       console.log(
         chalk.gray(
-          `  [${ts()}] Already at ${currentStore}, reordered: ${orderedStores.map((s) => s.code).join(" -> ")}`
+          `  [${ts()}] Already at ${currentStore}, reordered: ${orderedStores
+            .map((s) => s.code)
+            .join(" -> ")}`
         )
       );
     }
@@ -393,7 +418,9 @@ async function main() {
             let csrfToken = await extractCsrfToken(page);
             if (!csrfToken) {
               console.log(
-                chalk.yellow(`  [${ts()}] No CSRF token, loading purchase page first...`)
+                chalk.yellow(
+                  `  [${ts()}] No CSRF token, loading purchase page first...`
+                )
               );
               await loadPurchasePage(page);
               totalRequests++;
@@ -404,7 +431,11 @@ async function main() {
               totalRequests++;
             } else {
               console.log(
-                chalk.yellow(`  [${ts()}] ${store.name}: Still no CSRF token after page load, skipping switch`)
+                chalk.yellow(
+                  `  [${ts()}] ${
+                    store.name
+                  }: Still no CSRF token after page load, skipping switch`
+                )
               );
             }
           }
@@ -417,7 +448,9 @@ async function main() {
           if (!ok) {
             console.log(
               chalk.yellow(
-                `  [${ts()}] ${store.name}: HTTP error loading purchase page (attempt ${attempt}/${MAX_TRIES_PER_STORE})`
+                `  [${ts()}] ${
+                  store.name
+                }: HTTP error loading purchase page (attempt ${attempt}/${MAX_TRIES_PER_STORE})`
               )
             );
             await wait(2000);
@@ -430,7 +463,9 @@ async function main() {
           if (await isCloudflareAlwaysOnline(page)) {
             console.log(
               chalk.yellow(
-                `  [${ts()}] ${store.name}: Site went offline (Cloudflare Always Online), aborting cycle`
+                `  [${ts()}] ${
+                  store.name
+                }: Site went offline (Cloudflare Always Online), aborting cycle`
               )
             );
             siteOffline = true;
@@ -442,7 +477,9 @@ async function main() {
           if (!url.includes("/purchase/gold")) {
             console.log(
               chalk.yellow(
-                `  [${ts()}] ${store.name}: Not on purchase page (${url}), attempt ${attempt}`
+                `  [${ts()}] ${
+                  store.name
+                }: Not on purchase page (${url}), attempt ${attempt}`
               )
             );
             await wait(2000);
@@ -454,7 +491,9 @@ async function main() {
           if (nowStore !== store.code) {
             console.log(
               chalk.yellow(
-                `  [${ts()}] ${store.name}: Store is ${nowStore}, not ${store.code}, retrying...`
+                `  [${ts()}] ${store.name}: Store is ${nowStore}, not ${
+                  store.code
+                }, retrying...`
               )
             );
             await wait(1000);
@@ -475,12 +514,29 @@ async function main() {
 
           allResults.push({ store, variants });
           printStockTable(store.code, store.name, variants);
+
+          // Send Telegram per store (test mode sends every cycle, normal only on stock)
+          const hasStock = variants.some((v) => v.inStock);
+          if (testMode || hasStock) {
+            const msg = buildStoreTelegramMessage(store, variants, cycle);
+            console.log(
+              chalk.gray(
+                `  [${ts()}] [telegram] Sending ${
+                  hasStock ? "STOCK FOUND" : "no-stock"
+                } alert for ${store.name}...`
+              )
+            );
+            await sendTelegram(msg.text);
+          }
+
           success = true;
           break;
         } catch (err) {
           console.log(
             chalk.red(
-              `  [${ts()}] ${store.name}: ${err.message} (attempt ${attempt}/${MAX_TRIES_PER_STORE})`
+              `  [${ts()}] ${store.name}: ${
+                err.message
+              } (attempt ${attempt}/${MAX_TRIES_PER_STORE})`
             )
           );
           await wait(2000);
@@ -490,10 +546,15 @@ async function main() {
       if (!success) {
         console.log(
           chalk.red(
-            `  [${ts()}] ${store.name}: Failed after ${MAX_TRIES_PER_STORE} attempts\n`
+            `  [${ts()}] ${
+              store.name
+            }: Failed after ${MAX_TRIES_PER_STORE} attempts\n`
           )
         );
       }
+
+      // Pause between stores to avoid rate limiting
+      await wait(STORE_GAP_MS);
     }
 
     // Summary line
@@ -530,31 +591,15 @@ async function main() {
       console.log(chalk.gray(`  >> No stock available at any store`));
     }
 
-    // Send to Telegram - every cycle
-    if (allResults.length > 0) {
-      const tg = buildTelegramMessage(allResults, cycle);
-      console.log(
-        chalk.gray(
-          `  [${ts()}] [telegram] Sending ${tg.hasStock ? "STOCK FOUND" : "no-stock"} update (cycle ${cycle})...`
-        )
-      );
-      await sendTelegram(tg.text);
-    } else {
-      console.log(
-        chalk.yellow(
-          `  [${ts()}] [telegram] No results to send (all stores failed)`
-        )
-      );
-    }
-
-    // Wait 1 full minute after the last request
+    // Wait 1 minute after the last request
     const nextAt = new Date(Date.now() + CYCLE_INTERVAL_MS);
     console.log(
       chalk.gray(
-        `\n  [${ts()}] ${totalRequests} requests this cycle. Next check at ${nextAt.toLocaleTimeString(
-          "id-ID",
-          { hour: "2-digit", minute: "2-digit", second: "2-digit" }
-        )}...`
+        `\n  [${ts()}] ${totalRequests} requests this cycle. Next check at ${nextAt.toLocaleTimeString("id-ID", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })}...`
       )
     );
     await wait(CYCLE_INTERVAL_MS);

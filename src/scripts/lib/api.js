@@ -164,6 +164,16 @@ class LogamMuliaAPI {
       hematBrankas: parseFloat($('#hemat_brankas').val()) || 10,
     };
 
+    // Parse purchase_array from inline script for quantity data
+    let purchaseArray = null;
+    $('script').each((i, el) => {
+      const text = $(el).html() || '';
+      const match = text.match(/var\s+purchase_array\s*=\s*(\[[\s\S]*?\]);/);
+      if (match) {
+        try { purchaseArray = JSON.parse(match[1]); } catch (e) { /* ignore */ }
+      }
+    });
+
     // Parse each variant row
     const variants = [];
     $('form#purchase .ctr').each((i, el) => {
@@ -190,6 +200,17 @@ class LogamMuliaAPI {
         inStock: !isDisabled && !noStock,
       });
     });
+
+    // Merge availableQty from purchase_array (matched by index - same 12 variants)
+    if (purchaseArray && Array.isArray(purchaseArray)) {
+      for (let i = 0; i < variants.length; i++) {
+        const pa = purchaseArray[i];
+        if (pa) {
+          variants[i].availableQty = pa.quantity ?? null;
+          if (!variants[i].price && pa.price) variants[i].price = pa.price;
+        }
+      }
+    }
 
     return { variants, taxParams, csrfToken: this.csrfToken };
   }

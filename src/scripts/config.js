@@ -46,6 +46,7 @@ module.exports = {
   telegram: {
     botToken: process.env.LM_TELEGRAM_BOT_TOKEN || '',
     chatId: process.env.LM_TELEGRAM_CHAT_ID || '',
+    testMode: process.env.LM_TELEGRAM_TEST_MODE === 'true',
   },
 
   cartItems: parseCartItems(process.env.LM_CART_ITEMS),

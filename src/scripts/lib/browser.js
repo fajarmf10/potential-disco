@@ -40,8 +40,13 @@ async function launchBrowser(options = {}) {
   }
 
   // Launch a new Chrome instance (stealth plugin is Chrome-only)
+  // Disable automatic browser kill on process exit/crash so the user can
+  // continue manually if the script dies unexpectedly.
   const browser = await puppeteer.launch({
     headless: config.headless,
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -684,9 +689,25 @@ async function clearBrowserState(page) {
   console.log('[browser] logammulia.com state cleared');
 }
 
+async function isCloudflareAlwaysOnline(page) {
+  try {
+    return await page.evaluate(() => {
+      const bodyText = document.body?.innerText || '';
+      return (
+        bodyText.includes('Always Online') ||
+        bodyText.includes('currently offline') ||
+        !!document.querySelector('#cf-always-online')
+      );
+    });
+  } catch {
+    return false;
+  }
+}
+
 module.exports = {
   launchBrowser,
   waitForCloudflare,
+  isCloudflareAlwaysOnline,
   login,
   raceLoadPage,
   openUrlInMultipleTabs,
