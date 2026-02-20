@@ -11,10 +11,11 @@ const {
 } = require("./lib/browser");
 
 const NAVIGATION_TIMEOUT = 60_000;
-const STORES = Object.entries(config.storeNames).map(([code, name]) => ({
-  code,
-  name,
-}));
+// const STORES = Object.entries(config.storeNames).map(([code, name]) => ({
+//   code,
+//   name,
+// }));
+const STORES = [];
 const PRIORITY_STORE_CODES = ["ASB1", "ASB2", "ABDH"];
 const MAX_TRIES_PER_STORE = 2;
 const CYCLE_INTERVAL_MS = 60_000; // 1 minute after last request
@@ -55,7 +56,9 @@ const TG_ENABLED = !!(config.telegram.botToken && config.telegram.chatId);
 
 async function sendTelegram(text) {
   if (!TG_ENABLED) {
-    console.log(chalk.gray(`  [${ts()}] [telegram] Disabled (no token/chatId)`));
+    console.log(
+      chalk.gray(`  [${ts()}] [telegram] Disabled (no token/chatId)`)
+    );
     return false;
   }
   const url = `https://api.telegram.org/bot${config.telegram.botToken}/sendMessage`;
@@ -66,11 +69,19 @@ async function sendTelegram(text) {
       parse_mode: "HTML",
       disable_web_page_preview: true,
     });
-    console.log(chalk.green(`  [${ts()}] [telegram] Sent OK (message_id: ${res.data?.result?.message_id})`));
+    console.log(
+      chalk.green(
+        `  [${ts()}] [telegram] Sent OK (message_id: ${
+          res.data?.result?.message_id
+        })`
+      )
+    );
     return true;
   } catch (err) {
     const detail = err.response?.data?.description || err.message;
-    console.log(chalk.yellow(`  [${ts()}] [telegram] Failed to send: ${detail}`));
+    console.log(
+      chalk.yellow(`  [${ts()}] [telegram] Failed to send: ${detail}`)
+    );
     return false;
   }
 }
@@ -212,7 +223,9 @@ async function switchStore(page, storeCode, csrfToken) {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-CSRF-TOKEN": token,
           },
-          body: `_token=${encodeURIComponent(token)}&location=${encodeURIComponent(code)}`,
+          body: `_token=${encodeURIComponent(
+            token
+          )}&location=${encodeURIComponent(code)}`,
           credentials: "same-origin",
           redirect: "follow",
         });
@@ -229,7 +242,9 @@ async function switchStore(page, storeCode, csrfToken) {
   if (!result.ok) {
     console.log(
       chalk.yellow(
-        `  [${ts()}] Store switch returned HTTP ${result.status}${result.error ? ": " + result.error : ""}`
+        `  [${ts()}] Store switch returned HTTP ${result.status}${
+          result.error ? ": " + result.error : ""
+        }`
       )
     );
   }
@@ -241,9 +256,11 @@ async function switchStore(page, storeCode, csrfToken) {
 // Check if the page is showing Cloudflare Always Online cached version
 async function isCloudflareAlwaysOnline(page) {
   return page.evaluate(() => {
-    return document.body?.innerText?.includes("Always Online") ||
+    return (
+      document.body?.innerText?.includes("Always Online") ||
       document.body?.innerText?.includes("currently offline") ||
-      !!document.querySelector("#cf-always-online");
+      !!document.querySelector("#cf-always-online")
+    );
   });
 }
 
@@ -311,9 +328,15 @@ async function main() {
     )
   );
   if (TG_ENABLED) {
-    console.log(chalk.gray(`  Telegram: enabled (chat ${config.telegram.chatId})`));
+    console.log(
+      chalk.gray(`  Telegram: enabled (chat ${config.telegram.chatId})`)
+    );
   } else {
-    console.log(chalk.gray("  Telegram: disabled (set LM_TELEGRAM_BOT_TOKEN and LM_TELEGRAM_CHAT_ID in .env)"));
+    console.log(
+      chalk.gray(
+        "  Telegram: disabled (set LM_TELEGRAM_BOT_TOKEN and LM_TELEGRAM_CHAT_ID in .env)"
+      )
+    );
   }
   console.log(chalk.gray("  Press Ctrl+C to stop\n"));
 
@@ -351,9 +374,7 @@ async function main() {
       totalRequests++;
       if (await isCloudflareAlwaysOnline(page)) {
         console.log(
-          chalk.yellow(
-            `  [${ts()}] Still offline. Waiting for next cycle.`
-          )
+          chalk.yellow(`  [${ts()}] Still offline. Waiting for next cycle.`)
         );
         const nextAt = new Date(Date.now() + CYCLE_INTERVAL_MS);
         console.log(
@@ -373,8 +394,12 @@ async function main() {
     const allResults = [];
 
     // Priority stores first (Surabaya), then the rest shuffled
-    const priority = STORES.filter((s) => PRIORITY_STORE_CODES.includes(s.code));
-    const rest = shuffle([...STORES.filter((s) => !PRIORITY_STORE_CODES.includes(s.code))]);
+    const priority = STORES.filter((s) =>
+      PRIORITY_STORE_CODES.includes(s.code)
+    );
+    const rest = shuffle([
+      ...STORES.filter((s) => !PRIORITY_STORE_CODES.includes(s.code)),
+    ]);
     const orderedStores = [...priority, ...rest];
     console.log(
       chalk.gray(
@@ -397,7 +422,9 @@ async function main() {
             let csrfToken = await extractCsrfToken(page);
             if (!csrfToken) {
               console.log(
-                chalk.yellow(`  [${ts()}] No CSRF token, loading purchase page first...`)
+                chalk.yellow(
+                  `  [${ts()}] No CSRF token, loading purchase page first...`
+                )
               );
               await loadPurchasePage(page);
               totalRequests++;
@@ -408,7 +435,11 @@ async function main() {
               totalRequests++;
             } else {
               console.log(
-                chalk.yellow(`  [${ts()}] ${store.name}: Still no CSRF token after page load, skipping switch`)
+                chalk.yellow(
+                  `  [${ts()}] ${
+                    store.name
+                  }: Still no CSRF token after page load, skipping switch`
+                )
               );
             }
           }
@@ -421,7 +452,9 @@ async function main() {
           if (!ok) {
             console.log(
               chalk.yellow(
-                `  [${ts()}] ${store.name}: HTTP error loading purchase page (attempt ${attempt}/${MAX_TRIES_PER_STORE})`
+                `  [${ts()}] ${
+                  store.name
+                }: HTTP error loading purchase page (attempt ${attempt}/${MAX_TRIES_PER_STORE})`
               )
             );
             await wait(2000);
@@ -434,7 +467,9 @@ async function main() {
           if (await isCloudflareAlwaysOnline(page)) {
             console.log(
               chalk.yellow(
-                `  [${ts()}] ${store.name}: Site went offline (Cloudflare Always Online), aborting cycle`
+                `  [${ts()}] ${
+                  store.name
+                }: Site went offline (Cloudflare Always Online), aborting cycle`
               )
             );
             siteOffline = true;
@@ -446,7 +481,9 @@ async function main() {
           if (!url.includes("/purchase/gold")) {
             console.log(
               chalk.yellow(
-                `  [${ts()}] ${store.name}: Not on purchase page (${url}), attempt ${attempt}`
+                `  [${ts()}] ${
+                  store.name
+                }: Not on purchase page (${url}), attempt ${attempt}`
               )
             );
             await wait(2000);
@@ -458,7 +495,9 @@ async function main() {
           if (nowStore !== store.code) {
             console.log(
               chalk.yellow(
-                `  [${ts()}] ${store.name}: Store is ${nowStore}, not ${store.code}, retrying...`
+                `  [${ts()}] ${store.name}: Store is ${nowStore}, not ${
+                  store.code
+                }, retrying...`
               )
             );
             await wait(1000);
@@ -498,7 +537,9 @@ async function main() {
         } catch (err) {
           console.log(
             chalk.red(
-              `  [${ts()}] ${store.name}: ${err.message} (attempt ${attempt}/${MAX_TRIES_PER_STORE})`
+              `  [${ts()}] ${store.name}: ${
+                err.message
+              } (attempt ${attempt}/${MAX_TRIES_PER_STORE})`
             )
           );
           await wait(2000);
@@ -508,15 +549,17 @@ async function main() {
       if (!success) {
         console.log(
           chalk.red(
-            `  [${ts()}] ${store.name}: Failed after ${MAX_TRIES_PER_STORE} attempts\n`
+            `  [${ts()}] ${
+              store.name
+            }: Failed after ${MAX_TRIES_PER_STORE} attempts\n`
           )
         );
       }
     }
 
     // Cycle summary
-    const storesWithStock = allResults.filter(
-      (r) => r.variants.some((v) => v.inStock)
+    const storesWithStock = allResults.filter((r) =>
+      r.variants.some((v) => v.inStock)
     );
 
     if (storesWithStock.length > 0) {
