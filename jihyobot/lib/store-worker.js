@@ -1,6 +1,6 @@
 const chalk = require('chalk');
 const config = require('./config');
-const { launchProfile, setupStore, waitForCloudflare, isCloudflareAlwaysOnline, NAVIGATION_TIMEOUT } = require('./browser');
+const { launchProfile, setupStore, waitForCloudflare, isCloudflareAlwaysOnline, getBrowserLabel, NAVIGATION_TIMEOUT } = require('./browser');
 const { parseStock } = require('./parser');
 const { getStoreData, setStoreData, hasDataChanged, hasStockDecreased } = require('./redis-client');
 const { buildStockMessage, formatPrice } = require('./telegram');
@@ -33,16 +33,20 @@ class StoreWorker {
     this.running = true;
     this.log(`Starting worker for ${chalk.bold(this.store.name)} (${this.store.code})`);
 
-    // Launch 2 profiles
-    const profileIds = ['A', 'B'];
+    // Priority stores get all browsers, others get just the first
+    const storeBrowsers = config.getBrowsersForStore(this.store.code);
+    const profileCount = storeBrowsers.length;
+    const profileIds = Array.from({ length: profileCount }, (_, i) => String.fromCharCode(65 + i));
     const launchResults = await Promise.allSettled(
       profileIds.map(async id => {
-        this.log(`Launching profile ${id}...`);
-        const { browser, page, context } = await launchProfile(this.store.code, id);
-        this.log(`Profile ${id}: setting up store...`);
+        const idx = id.charCodeAt(0) - 'A'.charCodeAt(0);
+        const bType = storeBrowsers[idx] || 'chrome';
+        this.log(`Launching profile ${id} (${bType})...`);
+        const { browser, page, context, browserType } = await launchProfile(this.store.code, id);
+        this.log(`Profile ${id} (${bType}): setting up store...`);
         await setupStore(page, this.store.code);
-        this.log(`Profile ${id}: ready (store verified: ${this.store.code})`);
-        return { id, browser, page, context };
+        this.log(`Profile ${id} (${bType}): ready (store verified: ${this.store.code})`);
+        return { id, browser, page, context, browserType };
       })
     );
 
@@ -60,7 +64,7 @@ class StoreWorker {
     }
 
     this.log(
-      chalk.green(`${this.profiles.length}/2 profiles ready. Starting monitoring loop.`)
+      chalk.green(`${this.profiles.length}/${profileCount} profiles ready. Starting monitoring loop.`)
     );
 
     await this.runLoop();
@@ -98,7 +102,7 @@ class StoreWorker {
   }
 
   async fetchAndProcess(profile) {
-    const label = `${this.store.code}-${profile.id}`;
+    const label = `${this.store.code}-${profile.id}:${getBrowserLabel(profile.browserType)}`;
     const deadline = Date.now() + config.retryDeadlineMs;
     const purchaseUrl = config.BASE_URL + config.endpoints.purchasePage;
 
@@ -228,17 +232,19 @@ class StoreWorker {
         await profile.page.close().catch(() => {});
       }
 
-      this.log(`Relaunching profile ${profile.id}...`);
+      const browserLabel = profile.browserType === 'firefox' ? 'Firefox' : 'Chrome';
+      this.log(`Relaunching profile ${profile.id} (${browserLabel})...`);
       await wait(5000);
 
-      const { browser, page, context } = await launchProfile(this.store.code, profile.id);
+      const { browser, page, context, browserType } = await launchProfile(this.store.code, profile.id);
       await setupStore(page, this.store.code);
 
       profile.browser = browser;
       profile.page = page;
       profile.context = context;
+      profile.browserType = browserType;
 
-      this.log(chalk.green(`Profile ${profile.id} relaunched successfully`));
+      this.log(chalk.green(`Profile ${profile.id} (${browserLabel}) relaunched successfully`));
     } catch (err) {
       this.log(chalk.red(`Failed to relaunch profile ${profile.id}: ${err.message}`));
     }
@@ -260,14 +266,16 @@ class StoreWorker {
       }
     }
 
-    // In 'separate' mode, close the browser too
-    if (config.profileMode === 'separate') {
-      const seen = new Set();
-      for (const p of this.profiles) {
-        if (p.browser && !seen.has(p.browser)) {
-          seen.add(p.browser);
-          await p.browser.close().catch(() => {});
-        }
+    // Close browser processes that this worker owns:
+    // - Firefox/Edge profiles always have their own process (no context sharing for Firefox)
+    // - Chrome/Edge in 'separate' mode have their own process
+    // - Chrome/Edge in 'context' mode share a process (closed by monitor.js)
+    const seen = new Set();
+    for (const p of this.profiles) {
+      const ownsProcess = p.browserType === 'firefox' || config.profileMode === 'separate';
+      if (ownsProcess && p.browser && !seen.has(p.browser)) {
+        seen.add(p.browser);
+        await p.browser.close().catch(() => {});
       }
     }
   }

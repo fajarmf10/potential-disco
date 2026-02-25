@@ -27,15 +27,25 @@ async function main() {
   console.log(chalk.gray(`    Cycle:          ${config.cycleMs / 1000}s`));
   console.log(chalk.gray(`    Retry deadline: ${config.retryDeadlineMs / 1000}s`));
   console.log(chalk.gray(`    Retry delay:    ${config.retryDelayMs / 1000}s`));
+  console.log(chalk.gray(`    Launch stagger: ${config.launchStaggerMs / 1000}s between stores`));
   console.log(chalk.gray(`    Profile mode:   ${config.profileMode}`));
   console.log(chalk.gray(`    Headless:       ${config.headless}`));
 
-  const profileCount = config.profileMode === 'context'
-    ? config.stores.length  // 1 Chrome per store (2 contexts each)
-    : config.stores.length * 2;  // 2 Chrome per store
-  const contextCount = config.stores.length * 2;
-  console.log(chalk.gray(`    Chrome procs:   ${profileCount}`));
-  console.log(chalk.gray(`    Total profiles: ${contextCount}`));
+  // Profile distribution: priority stores get all browsers, others get first only
+  const priorityCodes = config.stores.filter(s => config.priorityStores.has(s.code)).map(s => s.code);
+  const normalCodes = config.stores.filter(s => !config.priorityStores.has(s.code)).map(s => s.code);
+  const browsers = config.profileBrowsers;
+  const browserMapping = browsers.map((b, i) => `${String.fromCharCode(65 + i)}=${b}`).join(', ');
+  const totalProfiles = priorityCodes.length * browsers.length + normalCodes.length * 1;
+
+  console.log(chalk.gray(`    Browsers:       ${browserMapping}`));
+  if (priorityCodes.length > 0) {
+    console.log(chalk.gray(`    Priority:       ${priorityCodes.join(', ')} (${browsers.length} profiles each)`));
+  }
+  if (normalCodes.length > 0) {
+    console.log(chalk.gray(`    Normal:         ${normalCodes.join(', ')} (1 profile each, ${browsers[0]})`));
+  }
+  console.log(chalk.gray(`    Total profiles: ${totalProfiles}`));
 
   // Redis
   let redis;
@@ -97,12 +107,18 @@ async function main() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  // Launch all workers in parallel
-  console.log(chalk.cyan(`  [${ts()}] Launching ${workers.length} store workers...\n`));
+  // Launch workers with stagger delay to avoid thundering herd
+  console.log(chalk.cyan(`  [${ts()}] Launching ${workers.length} store workers (${config.launchStaggerMs / 1000}s stagger)...\n`));
 
-  await Promise.allSettled(
-    workers.map(w => w.start())
-  );
+  const workerPromises = [];
+  for (let i = 0; i < workers.length; i++) {
+    if (i > 0) {
+      await new Promise(r => setTimeout(r, config.launchStaggerMs));
+    }
+    workerPromises.push(workers[i].start());
+  }
+
+  await Promise.allSettled(workerPromises);
 
   // If all workers exited (shouldn't happen in normal ops), shutdown
   if (!shutdownRequested) {

@@ -61,6 +61,12 @@ function parseBrowserArgs(raw) {
 
 const stores = parseStores(process.env.JIHYO_STORES || 'ASB1,ASB2');
 
+// Priority stores get all configured browsers; others get only the first browser
+const priorityStoreSet = new Set(
+  (process.env.JIHYO_PRIORITY_STORES || 'ASB1,ASB2,ABDH')
+    .split(',').map(s => s.trim()).filter(Boolean)
+);
+
 module.exports = {
   BASE_URL,
   VARIANTS,
@@ -68,9 +74,10 @@ module.exports = {
   endpoints,
   stores,
 
-  cycleMs:          parseInt(process.env.JIHYO_CYCLE_MS || '30000', 10),
-  retryDeadlineMs:  parseInt(process.env.JIHYO_RETRY_DEADLINE_MS || '18000', 10),
-  retryDelayMs:     parseInt(process.env.JIHYO_RETRY_DELAY_MS || '6000', 10),
+  cycleMs:            parseInt(process.env.JIHYO_CYCLE_MS || '30000', 10),
+  retryDeadlineMs:    parseInt(process.env.JIHYO_RETRY_DEADLINE_MS || '18000', 10),
+  retryDelayMs:       parseInt(process.env.JIHYO_RETRY_DELAY_MS || '6000', 10),
+  launchStaggerMs:    parseInt(process.env.JIHYO_LAUNCH_STAGGER_MS || '2000', 10),
 
   redisUrl: process.env.JIHYO_REDIS_URL || 'redis://127.0.0.1:6379',
 
@@ -83,6 +90,27 @@ module.exports = {
   headless:     process.env.JIHYO_HEADLESS !== 'false',
   profileMode:  process.env.JIHYO_PROFILE_MODE || 'context',
   browserArgs:  parseBrowserArgs(process.env.JIHYO_BROWSER_ARGS),
+
+  // Browser assignment per profile: comma-separated list mapped to profiles A, B, C, ...
+  // Supported: chrome (stealth), firefox (native fingerprint), edge (stealth, different fingerprint)
+  profileBrowsers: (process.env.JIHYO_PROFILE_BROWSERS || 'chrome,firefox,edge')
+    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+
+  // Priority stores get all configured browsers; others get only the first one
+  priorityStores: priorityStoreSet,
+
+  // Returns the browser list for a given store code.
+  // Priority stores get all browsers. Others get 1 browser, round-robin across types.
+  getBrowsersForStore(storeCode) {
+    if (priorityStoreSet.has(storeCode)) {
+      return this.profileBrowsers; // all browsers
+    }
+    // Round-robin: use store's index among non-priority stores to pick a browser
+    const nonPriority = this.stores.filter(s => !priorityStoreSet.has(s.code));
+    const idx = nonPriority.findIndex(s => s.code === storeCode);
+    const browser = this.profileBrowsers[idx % this.profileBrowsers.length];
+    return [browser];
+  },
 
   getVariantById(id) {
     return VARIANTS.find(v => v.id === id);

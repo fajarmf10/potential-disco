@@ -1,9 +1,11 @@
+const fs = require('fs');
 const path = require('path');
-const puppeteer = require('puppeteer-extra');
+const puppeteerChrome = require('puppeteer-extra');
+const puppeteerBase = require('puppeteer');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const config = require('./config');
 
-puppeteer.use(StealthPlugin());
+puppeteerChrome.use(StealthPlugin());
 
 const NAVIGATION_TIMEOUT = 60_000;
 const CF_WAIT_TIMEOUT = 30_000;
@@ -13,26 +15,82 @@ function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// * Shared browser cache for 'context' mode — one browser per storeCode
+// Shared browser cache for 'context' mode - one browser per storeCode+browserType
 const sharedBrowsers = new Map();
 
-/**
- * Launch (or reuse) a headless Chrome with a dedicated profile directory.
- * Returns { browser, page } where page is a fresh tab inside the profile's context.
- *
- * In 'context' mode: one Chrome process per store, two browser contexts.
- * In 'separate' mode: one Chrome process per profile (storeCode-A / storeCode-B).
- */
-async function launchProfile(storeCode, profileId) {
-  const profileDir = path.join(PROFILES_DIR, `${storeCode}-${profileId}`);
+// Edge executable paths (Windows)
+const EDGE_PATHS = [
+  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+];
 
-  if (config.profileMode === 'context') {
-    return launchContextProfile(storeCode);
+function findEdgePath() {
+  for (const p of EDGE_PATHS) {
+    if (fs.existsSync(p)) return p;
   }
-  return launchSeparateProfile(profileDir);
+  return null;
 }
 
-async function launchSeparateProfile(profileDir) {
+// Short labels for log output
+const BROWSER_LABELS = {
+  chrome: 'CR',
+  firefox: 'FF',
+  edge: 'ED',
+};
+
+function getBrowserLabel(browserType) {
+  return BROWSER_LABELS[browserType] || browserType.toUpperCase().slice(0, 2);
+}
+
+/**
+ * Launch a headless browser with a dedicated profile directory.
+ * Browser type per profile is controlled by JIHYO_PROFILE_BROWSERS env var.
+ * Default: A=chrome, B=firefox, C=edge
+ *
+ * Supported types: chrome (stealth), firefox (native), edge (stealth, different fingerprint)
+ * Returns { browser, page, browserType, context? }
+ */
+async function launchProfile(storeCode, profileId) {
+  const profileIndex = profileId.charCodeAt(0) - 'A'.charCodeAt(0);
+  const browserType = config.profileBrowsers[profileIndex] || 'chrome';
+  const profileDir = path.join(PROFILES_DIR, `${storeCode}-${profileId}`);
+
+  if (browserType === 'firefox') {
+    return launchFirefoxProfile(profileDir);
+  }
+
+  if (browserType === 'edge') {
+    return launchEdgeProfile(profileDir);
+  }
+
+  // Chrome: context mode shares a browser per store, separate mode gets its own
+  if (config.profileMode === 'context') {
+    return launchContextProfile(storeCode, browserType);
+  }
+  return launchChromeProfile(profileDir);
+}
+
+async function launchFirefoxProfile(profileDir) {
+  const browser = await puppeteerBase.launch({
+    browser: 'firefox',
+    headless: config.headless,
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
+    userDataDir: profileDir,
+    defaultViewport: { width: 1024, height: 768 },
+  });
+
+  const page = await browser.newPage();
+  return { browser, page, browserType: 'firefox' };
+}
+
+async function launchEdgeProfile(profileDir) {
+  const edgePath = findEdgePath();
+  if (!edgePath) {
+    throw new Error('Edge not found. Install Microsoft Edge or remove "edge" from JIHYO_PROFILE_BROWSERS.');
+  }
+
   const args = [
     '--no-sandbox',
     '--disable-setuid-sandbox',
@@ -42,7 +100,32 @@ async function launchSeparateProfile(profileDir) {
     ...config.browserArgs,
   ];
 
-  const browser = await puppeteer.launch({
+  // Edge is Chromium-based so stealth plugin works with it
+  const browser = await puppeteerChrome.launch({
+    headless: config.headless,
+    executablePath: edgePath,
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
+    args,
+    defaultViewport: { width: 1024, height: 768 },
+  });
+
+  const page = await browser.newPage();
+  return { browser, page, browserType: 'edge' };
+}
+
+async function launchChromeProfile(profileDir) {
+  const args = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-blink-features=AutomationControlled',
+    '--window-size=1024,768',
+    `--user-data-dir=${profileDir}`,
+    ...config.browserArgs,
+  ];
+
+  const browser = await puppeteerChrome.launch({
     headless: config.headless,
     handleSIGINT: false,
     handleSIGTERM: false,
@@ -52,14 +135,15 @@ async function launchSeparateProfile(profileDir) {
   });
 
   const page = await browser.newPage();
-  return { browser, page };
+  return { browser, page, browserType: 'chrome' };
 }
 
-async function launchContextProfile(storeCode) {
-  let browser = sharedBrowsers.get(storeCode);
+async function launchContextProfile(storeCode, browserType) {
+  const key = `${storeCode}:${browserType}`;
+  let browser = sharedBrowsers.get(key);
 
   if (!browser || !browser.isConnected()) {
-    const sharedDir = path.join(PROFILES_DIR, `${storeCode}-shared`);
+    const sharedDir = path.join(PROFILES_DIR, `${storeCode}-${browserType}-shared`);
     const args = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -69,20 +153,28 @@ async function launchContextProfile(storeCode) {
       ...config.browserArgs,
     ];
 
-    browser = await puppeteer.launch({
+    const launchOpts = {
       headless: config.headless,
       handleSIGINT: false,
       handleSIGTERM: false,
       handleSIGHUP: false,
       args,
       defaultViewport: { width: 1024, height: 768 },
-    });
-    sharedBrowsers.set(storeCode, browser);
+    };
+
+    if (browserType === 'edge') {
+      const edgePath = findEdgePath();
+      if (!edgePath) throw new Error('Edge not found for context mode');
+      launchOpts.executablePath = edgePath;
+    }
+
+    browser = await puppeteerChrome.launch(launchOpts);
+    sharedBrowsers.set(key, browser);
   }
 
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
-  return { browser, page, context };
+  return { browser, page, context, browserType };
 }
 
 async function waitForCloudflare(page) {
@@ -243,5 +335,6 @@ module.exports = {
   switchStore,
   setupStore,
   getSharedBrowsers,
+  getBrowserLabel,
   NAVIGATION_TIMEOUT,
 };
