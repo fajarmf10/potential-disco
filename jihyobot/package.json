@@ -1,0 +1,19 @@
+{
+  "name": "jihyobot",
+  "version": "1.0.0",
+  "description": "Parallel gold stock monitor for logammulia.com with Redis & Telegram",
+  "main": "monitor.js",
+  "scripts": {
+    "start": "node monitor.js",
+    "start:debug": "node monitor.js --debug"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "chalk": "^4.1.2",
+    "dotenv": "^16.4.0",
+    "ioredis": "^5.4.0",
+    "puppeteer": "^23.0.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
